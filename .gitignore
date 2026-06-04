@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# ツールのキャッシュ
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# 環境変数 (.env.example はコミットする)
+.env
+
+# 生成物・実行時ログ
+ner.html
+*.log
+
+# 開発メモ（管理対象外）
+docs-dev/
+
+# テスト用データ（ローカルのみ）
+testdata/
+
+# Office の一時ロックファイル
+~$*

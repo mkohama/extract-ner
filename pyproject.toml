@@ -1,0 +1,59 @@
+[project]
+name = "extract-ner"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "chardet>=5.2.0",
+    "click>=8.4.1",
+    "ginza>=5.2.0",
+    "ja-ginza>=5.2.0",
+    "ja-ginza-electra>=5.2.0",
+    "langchain>=0.1.0",
+    "langchain-community>=0.1.0",
+    "mcp>=0.9.0",
+    "numpy<2",
+    "openpyxl>=3.1.5",
+    "pandas>=2.0",
+    "pdfminer-six>=20221105",
+    "python-docx>=0.8.11",
+    "python-dotenv>=1.2.2",
+    "python-pptx>=1.0.2",
+    "spacy>=3.6,<3.8",
+    "streamlit>=1.51.0",
+    "tabulate>=0.9.0",
+    "xlrd>=2.0.2",
+]
+
+[tool.mypy]
+python_version = "3.11"
+
+# 型スタブを提供しない（または lint 実行環境に入っていない）サードパーティ
+# ライブラリの import エラーを抑制する。
+[[tool.mypy.overrides]]
+module = [
+    "chardet",
+    "docx",
+    "docx.*",
+    "dotenv",
+    "langchain_core",
+    "langchain_core.*",
+    "langchain_community",
+    "langchain_community.*",
+    "mcp",
+    "mcp.*",
+    "pandas",
+    "pandas.*",
+    "pdfminer",
+    "pdfminer.*",
+    "pptx",
+    "pptx.*",
+    "pydantic",
+    "pydantic.*",
+    "spacy",
+    "spacy.*",
+    "streamlit",
+    "streamlit.*",
+]
+ignore_missing_imports = true
