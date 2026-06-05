@@ -13,25 +13,81 @@ from spacy import displacy
 
 from src.ner.engine import ExtractionResult
 
-# 拡張固有表現ラベルごとの配色（大文字キーで定義）
+# 配色方針（マスキング用途）:
+#   このツールの目的は「LLM に渡す前の機密情報マスキング」。そこで
+#   「マスク対象として重要なカテゴリほど目立つ」配色にする。
+#   - 重要 PII（人名 / 社名・組織 / 商標・製品 / 地名・住所 / 連絡先）= 彩度の高い固有色。
+#   - 非 PII（日付 / 時刻 / 数値 / 肩書 / 印刷物 など）= 淡いグレーで背景化（DEFAULT_COLOR）。
+#   GiNZA の実ラベルは Title case（例: "Company"）だが displaCy が色マップのキーを
+#   大文字化するため、ここでは大文字キーで定義する（build_color_map 参照）。
+#   背景色の上に黒文字が乗るので、いずれも黒文字が読める明度にしている。
+
+# グループ色（マスク対象として重要なカテゴリ）
+_PERSON = "#ff8fab"  # 人名: ピンク（最重要・本丸）
+_ORG = "#ffab5e"  # 社名・組織: オレンジ（最重要・本丸）
+_PRODUCT = "#c792ea"  # 商標・製品: 紫（中に秘匿語が紛れる。要確認）
+_LOCATION = "#4fc3b0"  # 地名・住所: ティール
+_CONTACT = "#6cb6ff"  # 連絡先（電話/メール/URL）: 青
+
+# ラベル → グループ（大文字キー）。関根の拡張固有表現体系のうちマスクで効くものを束ねる。
+_PERSON_LABELS = ("PERSON", "N_PERSON")
+_ORG_LABELS = (
+    "COMPANY",
+    "COMPANY_GROUP",
+    "CORPORATION_OTHER",
+    "SHOW_ORGANIZATION",
+    "INTERNATIONAL_ORGANIZATION",
+    "POLITICAL_ORGANIZATION_OTHER",
+    "GOVERNMENT",
+    "POLITICAL_PARTY",
+    "SPORTS_ORGANIZATION_OTHER",
+    "ETHNIC_GROUP_OTHER",
+    "NATIONALITY",
+    "FAMILY",
+)
+_PRODUCT_LABELS = (
+    "PRODUCT_OTHER",
+    "AWARD",
+    "DECORATION",
+    "OFFENSE",
+    "SERVICE",
+    "CLASS",
+)
+_LOCATION_LABELS = (
+    "CITY",
+    "PROVINCE",
+    "COUNTRY",
+    "GPE_OTHER",
+    "ADDRESS",
+    "POSTAL_ADDRESS",
+    "GEOLOGICAL_REGION_OTHER",
+    "LOCATION_OTHER",
+    "DOMESTIC_REGION_OTHER",
+    "CONTINENTAL_REGION_OTHER",
+    "FACILITY_OTHER",
+    "FACILITY_PART",
+    "STATION",
+    "AIRPORT",
+    "N_LOCATION_OTHER",
+)
+_CONTACT_LABELS = ("PHONE_NUMBER", "EMAIL", "URL")
+
+# 拡張固有表現ラベルごとの配色（大文字キー）
 ENT_COLORS: dict[str, str] = {
-    "PERSON": "#b69bf2",
-    "N_PERSON": "#5b9bf5",
-    "POSITION_VOCATION": "#c9b3f7",
-    "DATE": "#9be88a",
-    "TIME": "#a6e22e",
-    "AGE": "#5b9bf5",
-    "MONEY": "#f7e84a",
-    "N_EVENT": "#5b9bf5",
-    "N_LOCATION_OTHER": "#5b9bf5",
-    "OCCASION_OTHER": "#6ddf6d",
-    "PRINTING_OTHER": "#d9d9d9",
-    "TITLE_OTHER": "#d9d9d9",
-    "RANK": "#c9b3f7",
-    "URL": "#d9d9d9",
+    **{label: _PERSON for label in _PERSON_LABELS},
+    **{label: _ORG for label in _ORG_LABELS},
+    **{label: _PRODUCT for label in _PRODUCT_LABELS},
+    **{label: _LOCATION for label in _LOCATION_LABELS},
+    **{label: _CONTACT for label in _CONTACT_LABELS},
 }
-# 未定義ラベルの既定色
-DEFAULT_COLOR = "#fdd8a5"
+
+# マスク対象として固有色を割り当てる「重要カテゴリ」の集合（大文字）。
+# 将来のマスキング/戦略比較ロジックからも参照できるよう公開する。
+MASKING_CRITICAL_LABELS: frozenset[str] = frozenset(ENT_COLORS)
+
+# 重要カテゴリ以外（非 PII = 日付・数値・肩書・印刷物など）の既定色。
+# 淡いグレーにして視覚的に背景化し、PII を際立たせる。
+DEFAULT_COLOR = "#dcdcdc"
 
 
 def build_color_map(labels: Iterable[str]) -> dict[str, str]:

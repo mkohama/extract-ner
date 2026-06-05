@@ -15,11 +15,13 @@ from src.ner.engine import (
     Entity,
     ExtractionResult,
     NerEngine,
+    TokenInfo,
 )
 from src.ner.preprocess import flatten_markdown_tables, prepare_for_ner
 from src.ner.rendering import (
     DEFAULT_COLOR,
     ENT_COLORS,
+    MASKING_CRITICAL_LABELS,
     build_color_map,
     render_html,
     to_displacy_data,
@@ -31,10 +33,12 @@ __all__ = [
     "Entity",
     "ExtractionResult",
     "NerEngine",
+    "TokenInfo",
     "prepare_for_ner",
     "flatten_markdown_tables",
     "ENT_COLORS",
     "DEFAULT_COLOR",
+    "MASKING_CRITICAL_LABELS",
     "build_color_map",
     "render_html",
     "to_displacy_data",

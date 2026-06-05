@@ -28,6 +28,18 @@ dependencies = [
     "xlrd>=2.0.2",
 ]
 
+[project.scripts]
+extract-ner = "src.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# パッケージは src/（importable な名前が "src"）。app.py / main.py はルート直下の
+# スクリプトで、エントリポイント（src.cli）は editable インストールで解決される。
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
 [tool.mypy]
 python_version = "3.11"
 
@@ -36,6 +48,8 @@ python_version = "3.11"
 [[tool.mypy.overrides]]
 module = [
     "chardet",
+    "click",
+    "click.*",
     "docx",
     "docx.*",
     "dotenv",

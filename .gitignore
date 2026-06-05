@@ -21,6 +21,9 @@ wheels/
 ner.html
 *.log
 
+# デバッグ出力（実データを含みうるのでコミットしない）
+debug_tokens*.txt
+
 # 開発メモ（管理対象外）
 docs-dev/
 

@@ -50,6 +50,23 @@ class Entity:
 
 
 @dataclass(frozen=True)
+class TokenInfo:
+    """1 トークンの診断情報（recall の穴を実データで観察するためのデバッグ用）。
+
+    マスキング目的では「GiNZA の NER が逃した固有名詞を、文脈非依存な
+    SudachiPy の品詞（``tag``）で拾えるか」が要点。両者を並べて観察する。
+    """
+
+    text: str  # 表層形
+    tag: str  # SudachiPy 品詞（例: 名詞-固有名詞-人名-姓）。文脈依存が小さい
+    pos: str  # UD 品詞（例: PROPN）
+    ent_type: str  # GiNZA の NER ラベル（無ければ ""）
+    ent_iob: str  # B / I / O（エンティティ境界）
+    is_oov: bool  # 語彙外フラグ（モデルのベクトル有無に依存。electra では参考値）
+    norm: str  # 正規化表層形
+
+
+@dataclass(frozen=True)
 class ExtractionResult:
     """抽出結果。
 
@@ -142,11 +159,7 @@ class NerEngine:
             ExtractionResult（連結した解析テキストと、位置補正済みの抽出結果）。
         """
         # 解析する小片を確定（平文化 → バイト数安全分割 → 空片除去）
-        pieces: list[str] = []
-        for chunk in chunks:
-            prepared = prepare_for_ner(chunk) if flatten_tables else chunk
-            pieces.extend(_byte_safe_pieces(prepared))
-        pieces = [p for p in pieces if p.strip()]
+        pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
 
         # 小片ごとに NER（nlp.pipe でバッチ処理）し、全文基準にオフセット補正
         entities: list[Entity] = []
@@ -171,6 +184,61 @@ class NerEngine:
         if labels is not None:
             result = result.filter(labels)
         return result
+
+    def debug_tokens(
+        self,
+        chunks: Iterable[str],
+        *,
+        flatten_tables: bool = False,
+    ) -> list[TokenInfo]:
+        """各トークンの SudachiPy 品詞と GiNZA NER ラベルを並べて返す（デバッグ用）。
+
+        :meth:`extract_chunks` と**同じ小片分割**（平文化 → バイト数安全分割）を
+        通すため、ここで見えるトークンは実際に NER が解析する対象と一致する。
+
+        マスキングの recall の穴（NER は逃すが SudachiPy は固有名詞・人名として
+        割っている語など）を実データで観察するために使う。
+
+        Args:
+            chunks: 解析対象チャンクの列。
+            flatten_tables: True なら各チャンクを平文化してから解析する。
+
+        Returns:
+            空白トークンを除いた :class:`TokenInfo` のリスト（出現順）。
+        """
+        pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
+        infos: list[TokenInfo] = []
+        for doc in self.nlp.pipe(pieces):
+            for tok in doc:
+                if tok.is_space:
+                    continue
+                infos.append(
+                    TokenInfo(
+                        text=tok.text,
+                        tag=tok.tag_,
+                        pos=tok.pos_,
+                        ent_type=tok.ent_type_,
+                        ent_iob=tok.ent_iob_,
+                        is_oov=tok.is_oov,
+                        norm=tok.norm_,
+                    )
+                )
+        return infos
+
+
+def _prepare_pieces(
+    chunks: Iterable[str], *, flatten_tables: bool = False
+) -> list[str]:
+    """チャンク列を、実際に NER へ渡す小片（バイト数安全・空片除去済み）に整える。
+
+    :meth:`NerEngine.extract_chunks` と :meth:`NerEngine.debug_tokens` が同じ
+    入力で解析するよう、分割処理をここに集約する。
+    """
+    pieces: list[str] = []
+    for chunk in chunks:
+        prepared = prepare_for_ner(chunk) if flatten_tables else chunk
+        pieces.extend(_byte_safe_pieces(prepared))
+    return [p for p in pieces if p.strip()]
 
 
 def _byte_safe_pieces(text: str, max_bytes: int = SAFE_CHUNK_BYTES) -> list[str]:
