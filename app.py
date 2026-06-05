@@ -173,6 +173,24 @@ def main() -> None:
             "OFF（既定）では元のテキストをそのまま解析します。",
         )
 
+        st.divider()
+        st.subheader("🖥️ 表示")
+        view_height = st.slider(
+            "表示エリアの高さ (px)",
+            min_value=300,
+            max_value=2000,
+            value=600,
+            step=50,
+            help="固有表現のハイライト表示エリアの高さ。枠の右下をドラッグしても伸縮できます。",
+        )
+        font_size = st.slider(
+            "文字サイズ (em)",
+            min_value=0.8,
+            max_value=2.0,
+            value=1.05,
+            step=0.05,
+        )
+
     engine = get_engine(model_name)
     colors = build_color_map(engine.available_labels())
 
@@ -229,12 +247,13 @@ def main() -> None:
             )
 
     with col_main:
-        # ハイライト表示 (st.html で静的 HTML をインライン描画。高さ制限とスクロールは
-        # ラッパー div の CSS で持たせる)
+        # ハイライト表示 (st.html で静的 HTML をインライン描画。高さ・文字サイズは
+        # サイドバーのスライダーで可変。さらに resize:vertical で枠をドラッグ伸縮できる)
         html = render_html(shown, colors)
         st.html(
-            '<div style="max-height:500px; overflow:auto; line-height:2.2; '
-            f'font-size:1.05em;">{html}</div>'
+            f'<div style="height:{view_height}px; overflow:auto; resize:vertical; '
+            "line-height:2.2; border:1px solid rgba(128,128,128,0.25); "
+            f'border-radius:6px; padding:0.5em; font-size:{font_size}em;">{html}</div>'
         )
 
     # --- 抽出一覧 ---
