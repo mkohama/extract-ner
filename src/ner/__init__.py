@@ -12,6 +12,8 @@
 from src.ner.engine import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
+    AnalyzedToken,
+    Analysis,
     Entity,
     ExtractionResult,
     NerEngine,
@@ -21,15 +23,19 @@ from src.ner.preprocess import flatten_markdown_tables, prepare_for_ner
 from src.ner.rendering import (
     DEFAULT_COLOR,
     ENT_COLORS,
+    MASKING_CATEGORY_COLORS,
     MASKING_CRITICAL_LABELS,
     build_color_map,
     render_html,
+    render_masking_html,
     to_displacy_data,
 )
 
 __all__ = [
     "AVAILABLE_MODELS",
     "DEFAULT_MODEL",
+    "AnalyzedToken",
+    "Analysis",
     "Entity",
     "ExtractionResult",
     "NerEngine",
@@ -39,7 +45,9 @@ __all__ = [
     "ENT_COLORS",
     "DEFAULT_COLOR",
     "MASKING_CRITICAL_LABELS",
+    "MASKING_CATEGORY_COLORS",
     "build_color_map",
     "render_html",
+    "render_masking_html",
     "to_displacy_data",
 ]

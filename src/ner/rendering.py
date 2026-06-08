@@ -30,7 +30,8 @@ _LOCATION = "#4fc3b0"  # 地名・住所: ティール
 _CONTACT = "#6cb6ff"  # 連絡先（電話/メール/URL）: 青
 
 # ラベル → グループ（大文字キー）。関根の拡張固有表現体系のうちマスクで効くものを束ねる。
-_PERSON_LABELS = ("PERSON", "N_PERSON")
+# 注: 「N_*」（N_Person=人数 等）は数値表現（個数）であり固有名詞ではないので含めない。
+_PERSON_LABELS = ("PERSON",)
 _ORG_LABELS = (
     "COMPANY",
     "COMPANY_GROUP",
@@ -41,9 +42,6 @@ _ORG_LABELS = (
     "GOVERNMENT",
     "POLITICAL_PARTY",
     "SPORTS_ORGANIZATION_OTHER",
-    "ETHNIC_GROUP_OTHER",
-    "NATIONALITY",
-    "FAMILY",
 )
 _PRODUCT_LABELS = (
     "PRODUCT_OTHER",
@@ -68,7 +66,6 @@ _LOCATION_LABELS = (
     "FACILITY_PART",
     "STATION",
     "AIRPORT",
-    "N_LOCATION_OTHER",
 )
 _CONTACT_LABELS = ("PHONE_NUMBER", "EMAIL", "URL")
 
@@ -100,6 +97,46 @@ def build_color_map(labels: Iterable[str]) -> dict[str, str]:
     """
     palette = {key.upper(): color for key, color in ENT_COLORS.items()}
     return {label: palette.get(label.upper(), DEFAULT_COLOR) for label in labels}
+
+
+# マスキングのカテゴリ → 色（src.masking のカテゴリ名に対応）
+MASKING_CATEGORY_COLORS: dict[str, str] = {
+    "人名": _PERSON,
+    "社名": _ORG,
+    "商標": _PRODUCT,
+    "地名": _LOCATION,
+    "連絡先": _CONTACT,
+    "その他": DEFAULT_COLOR,
+}
+
+
+def render_masking_html(
+    text: str,
+    spans: Iterable[tuple[int, int, str]],
+    *,
+    page: bool = False,
+) -> str:
+    """マスク候補スパンを displaCy のハイライト HTML にする。
+
+    Args:
+        text: 元テキスト。
+        spans: (start, end, category) のイテラブル。category は MASKING_CATEGORY_COLORS のキー。
+    """
+    ents: list[dict[str, Any]] = []
+    last_end = -1
+    for start, end, category in sorted(spans, key=lambda s: s[0]):
+        if start < last_end:  # displaCy は重なりを許さないので捨てる
+            continue
+        ents.append({"start": start, "end": end, "label": category})
+        last_end = end
+    colors = {k.upper(): v for k, v in MASKING_CATEGORY_COLORS.items()}
+    return displacy.render(
+        {"text": text, "ents": ents, "title": None},
+        style="ent",
+        manual=True,
+        options={"colors": colors},
+        page=page,
+    )
 
 
 def to_displacy_data(result: ExtractionResult) -> dict[str, Any]:

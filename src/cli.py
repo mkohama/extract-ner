@@ -23,6 +23,7 @@ from pathlib import Path
 import click
 from spacy import displacy
 
+from src.masking import MaskDictionary, MaskingEngine
 from src.ner import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
@@ -36,6 +37,8 @@ from src.sources import SAMPLE_TEXT, load_chunks_from_file
 
 # プロジェクトルート（app.py や品質ゲート対象の解決に使う）
 _ROOT = Path(__file__).resolve().parent.parent
+# マスク辞書の既定パス
+_DEFAULT_DICT = _ROOT / "data" / "mask_dict.yaml"
 
 
 def _ensure_utf8_stdout() -> None:
@@ -150,7 +153,11 @@ def ui(streamlit_args: tuple[str, ...]) -> None:
     """
     app = _ROOT / "app.py"
     cmd = [sys.executable, "-m", "streamlit", "run", str(app), *streamlit_args]
-    raise SystemExit(subprocess.call(cmd))
+    try:
+        code = subprocess.call(cmd)
+    except KeyboardInterrupt:
+        code = 0  # Ctrl+C はサーバ停止の通常手順。正常終了として扱う（"Aborted!" を出さない）
+    raise SystemExit(code)
 
 
 @cli.command()
@@ -302,6 +309,80 @@ def debug(
     if out is not None:
         out.write_text(report, encoding="utf-8")
         click.echo(f"\nレポートを書き出しました（UTF-8）: {out.resolve()}")
+
+
+@cli.command()
+@click.argument(
+    "file", required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option("--text", help="ファイルの代わりにマスクするテキストを直接指定する。")
+@click.option(
+    "--dict",
+    "dict_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=f"マスク辞書(YAML)。既定: {_DEFAULT_DICT}（あれば自動で読む）。",
+)
+@click.option(
+    "--model",
+    "models",
+    multiple=True,
+    type=click.Choice(list(AVAILABLE_MODELS)),
+    help="使うモデル（複数指定可。既定は両モデル併用）。",
+)
+@click.option(
+    "--flatten", is_flag=True, help="Markdown テーブルを平文化してから解析する。"
+)
+@click.option(
+    "--out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="マスク済みテキストを UTF-8 で書き出す。",
+)
+def mask(
+    file: Path | None,
+    text: str | None,
+    dict_path: Path | None,
+    models: tuple[str, ...],
+    flatten: bool,
+    out: Path | None,
+) -> None:
+    """機密情報を検出してマスク（伏せ字）する。確定/強は自動マスク、弱はレビュー候補。"""
+    chunks = _load_chunks(file, text)
+
+    path = dict_path or (_DEFAULT_DICT if _DEFAULT_DICT.exists() else None)
+    dictionary = (
+        MaskDictionary.load(path) if path is not None else MaskDictionary.empty()
+    )
+    click.echo(f"マスク辞書: {path or '（なし）'}（{len(dictionary)} 表層）")
+
+    used = list(models) or list(AVAILABLE_MODELS)
+    click.echo(f"モデル: {', '.join(used)} を読み込み中 ...")
+    engine = MaskingEngine(dictionary=dictionary, models=used)
+    analysis = engine.analyze(chunks, flatten_tables=flatten)
+    # 実体（表層）ごとに集約。確定/強を自動マスク（全出現に展開）。
+    groups = engine.group_candidates(analysis.candidates)
+    selected = [m for g in groups if g.confidence in ("確定", "強") for m in g.members]
+    result = engine.apply(analysis, selected)
+
+    click.echo("\n===== マスク済みテキスト（自動マスク＝確定/強） =====")
+    click.echo(result.masked_text)
+
+    click.echo(f"\n===== 対応表（{len(result.mapping)} 種・自動マスク） =====")
+    for entry in result.mapping:
+        click.echo(
+            f"{entry.placeholder}\t[{entry.category}]\t{' / '.join(entry.surfaces)}"
+        )
+
+    review = [g for g in groups if g.confidence in ("中", "弱")]
+    click.echo(f"\n===== レビュー候補（中/弱・{len(review)} 実体） =====")
+    for g in review:
+        detail = " ".join(f"{ch}={label}" for ch, label in g.votes)
+        click.echo(
+            f"・{g.surface}\t[{g.category}/{g.confidence}]\t出現{g.count}\t({detail})"
+        )
+
+    if out is not None:
+        out.write_text(result.masked_text, encoding="utf-8")
+        click.echo(f"\nマスク済みテキストを書き出しました（UTF-8）: {out.resolve()}")
 
 
 @cli.command()

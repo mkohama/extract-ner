@@ -9,13 +9,14 @@
     from src.ner import NerEngine
 
     engine = NerEngine("ja_ginza_electra")
-    result = engine.extract("銀座のSONYに勤める由利さん", labels=["Company"])
+    result = engine.extract("エクスモ社に勤める担当者", labels=["Company"])
     for ent in result.entities:
         print(ent.text, ent.label)
 """
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
@@ -23,6 +24,18 @@ from functools import cached_property
 import spacy
 
 from src.ner.preprocess import prepare_for_ner
+
+# ja_ginza_electra（torch/thinc/huggingface）系が出す deprecation 警告を抑制する。
+# 推論のたびに大量に出る `torch.cuda.amp.autocast(...)` ほか、初回ロード時の
+# huggingface_hub / transformers の deprecation などのノイズ（実害なし・我々のコード起因ではない）。
+# サードパーティのモジュールに限定して抑制し、自前コードの警告は残す。
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch\.cuda\.amp\.autocast.*",
+    category=FutureWarning,
+)
+for _noisy in ("thinc", "torch", "huggingface_hub", "transformers"):
+    warnings.filterwarnings("ignore", category=FutureWarning, module=rf"{_noisy}.*")
 
 # 利用可能な GiNZA モデル（先頭が既定）
 AVAILABLE_MODELS: tuple[str, ...] = ("ja_ginza_electra", "ja_ginza")
@@ -64,6 +77,31 @@ class TokenInfo:
     ent_iob: str  # B / I / O（エンティティ境界）
     is_oov: bool  # 語彙外フラグ（モデルのベクトル有無に依存。electra では参考値）
     norm: str  # 正規化表層形
+
+
+@dataclass(frozen=True)
+class AnalyzedToken:
+    """全文オフセット付きの 1 トークン（マスキングのパイプラインが使う）。"""
+
+    start: int  # 連結した全文中の開始文字位置
+    end: int  # 同・終了文字位置
+    surface: str
+    tag: str  # SudachiPy 品詞
+    pos: str  # UD 品詞
+
+
+@dataclass(frozen=True)
+class Analysis:
+    """1 モデルでの解析結果（全文・トークン列・NER エンティティ）。
+
+    トークンは SudachiPy のトークナイズ（品詞つき）、entities はこのモデルの
+    NER ラベル。複数モデルを併用するときは entities を和集合する（トークンは
+    同じ SudachiPy なのでどれか 1 つで足りる）。
+    """
+
+    text: str
+    tokens: tuple[AnalyzedToken, ...]
+    entities: tuple[Entity, ...]
 
 
 @dataclass(frozen=True)
@@ -224,6 +262,52 @@ class NerEngine:
                     )
                 )
         return infos
+
+    def analyze_chunks(
+        self,
+        chunks: Iterable[str],
+        *,
+        flatten_tables: bool = False,
+    ) -> Analysis:
+        """チャンク列を解析し、全文・オフセット付きトークン・NER エンティティを返す。
+
+        :meth:`extract_chunks` と同じ小片分割・オフセット補正を使う。マスキングの
+        パイプライン（src.masking）が、SudachiPy 品詞とスパンを使って候補を作るために用いる。
+        """
+        pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
+        tokens: list[AnalyzedToken] = []
+        entities: list[Entity] = []
+        offset = 0
+        sep_len = len(CHUNK_SEPARATOR)
+        for piece, doc in zip(pieces, self.nlp.pipe(pieces)):
+            for tok in doc:
+                if tok.is_space:
+                    continue
+                start = tok.idx + offset
+                tokens.append(
+                    AnalyzedToken(
+                        start=start,
+                        end=start + len(tok.text),
+                        surface=tok.text,
+                        tag=tok.tag_,
+                        pos=tok.pos_,
+                    )
+                )
+            for ent in doc.ents:
+                entities.append(
+                    Entity(
+                        text=ent.text,
+                        label=ent.label_,
+                        start=ent.start_char + offset,
+                        end=ent.end_char + offset,
+                    )
+                )
+            offset += len(piece) + sep_len
+        return Analysis(
+            text=CHUNK_SEPARATOR.join(pieces),
+            tokens=tuple(tokens),
+            entities=tuple(entities),
+        )
 
 
 def _prepare_pieces(

@@ -30,5 +30,10 @@ docs-dev/
 # テスト用データ（ローカルのみ）
 testdata/
 
+# マスク辞書（実データ＝社名・商標・社員名）はコミットしない（.env 同様）。
+# 書式は data/mask_dict.sample.yaml（コミット対象）を参照。
+data/*.yaml
+!data/*.sample.yaml
+
 # Office の一時ロックファイル
 ~$*

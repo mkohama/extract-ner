@@ -34,7 +34,7 @@ def flatten_markdown_tables(text: str, delimiter: str = TABLE_CELL_DELIMITER) ->
     する。ヘッダー行に依存しないため、テーブルの途中だけを含むチャンクに
     適用しても破綻しない（`| 由利` のような記号混じりの誤抽出を生まない）。
 
-    なお GiNZA の NER は文脈依存が強く、短い語や曖昧な語（例: "Sony"）は
+    なお GiNZA の NER は文脈依存が強く、短い語や曖昧な語（短い英字の社名など）は
     どの整形をしても抽出されないことがある点には注意。
     """
     out: list[str] = []
