@@ -256,6 +256,15 @@ def _context(text: str, start: int, end: int, width: int = 20) -> str:
 _CONFIDENCE_ORDER = {"確定": 0, "強": 1, "中": 2, "弱": 3}
 
 
+def _confidence_label(confidence: str) -> str:
+    """並び順の番号を前置した表示用ラベル（例 '1 確定'）。
+
+    列ヘッダで文字列ソートしても 確定→強→中→弱 の順になるようにする
+    （番号なしだと文字コード順で「中→確定」になってしまう）。1=確定 … 4=弱。
+    """
+    return f"{_CONFIDENCE_ORDER.get(confidence, 9) + 1} {confidence}"
+
+
 def _sorted_by_confidence(items, *, key):
     """確信度 降順（確定→強→中→弱）→ 第2キー（表層など）昇順で並べる＝表の既定順。
 
@@ -280,7 +289,7 @@ def _render_by_entity(engine, analysis):
         [
             {
                 "マスク": g.confidence in AUTO_MASK_CONFIDENCE,
-                "確信度": g.confidence,
+                "確信度": _confidence_label(g.confidence),
                 "カテゴリ": g.category,
                 "表層": g.surface,
                 "出現": g.count,
@@ -318,7 +327,7 @@ def _render_by_occurrence(engine, analysis):
         [
             {
                 "マスク": c.confidence in AUTO_MASK_CONFIDENCE,
-                "確信度": c.confidence,
+                "確信度": _confidence_label(c.confidence),
                 "カテゴリ": c.category,
                 "表層": c.surface,
                 "文脈": _context(analysis.text, c.start, c.end),
