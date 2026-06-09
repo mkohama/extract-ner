@@ -314,9 +314,7 @@ class MaskingEngine:
             mapping=mapping,
         )
 
-    def group_candidates(
-        self, candidates: Iterable[Candidate]
-    ) -> list[CandidateGroup]:
+    def group_candidates(self, candidates: Iterable[Candidate]) -> list[CandidateGroup]:
         """候補を実体（カテゴリ×代表表記）ごとにまとめる。
 
         出現ごとの候補を 1 実体 1 行にする（confidence は最良、votes は和集合）。
@@ -326,7 +324,10 @@ class MaskingEngine:
         order: list[tuple[str, str]] = []
         for c in candidates:
             canonical = self.dictionary.canonical_of(c.surface)
-            key = (c.category, normalize(canonical) if canonical else normalize(c.surface))
+            key = (
+                c.category,
+                normalize(canonical) if canonical else normalize(c.surface),
+            )
             if key not in groups:
                 groups[key] = []
                 order.append(key)
@@ -382,7 +383,12 @@ def _confidence(category: str, counts: Counter[str]) -> str:
 
 
 def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
-    """重なる候補スパンを 1 つにまとめ、票数とカテゴリから確信度を決める。"""
+    """重なる候補スパンをまとめ、票数とカテゴリから確信度を決める。
+
+    辞書一致を含むクラスタは**辞書境界で分割**する（粗い NER スパンに辞書の実体を
+    飲み込ませない）。例：`SONY・Nikon・Canon` を 1 つにせず SONY/Nikon/Canon の各辞書
+    スパンへ、`小浜出身` を `小浜` だけに割る。辞書一致が無ければ従来どおり 1 スパンに統合。
+    """
     if not cands:
         return []
     ordered = sorted(cands, key=lambda c: (c.start, c.end))
@@ -394,10 +400,32 @@ def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
             end = max(end, c.end)
             members.append(c)
         else:
-            clusters.append(_merge(text, start, end, members))
+            clusters.extend(_resolve_cluster(text, start, end, members))
             start, end, members = c.start, c.end, [c]
-    clusters.append(_merge(text, start, end, members))
+    clusters.extend(_resolve_cluster(text, start, end, members))
     return clusters
+
+
+def _has_dict_vote(c: Candidate) -> bool:
+    return any(ch == "dict" for ch, _ in c.votes)
+
+
+def _resolve_cluster(
+    text: str, start: int, end: int, members: list[Candidate]
+) -> list[Candidate]:
+    """1 クラスタを確信度づけ。辞書一致があれば辞書スパンごとに分割して返す。
+
+    辞書スパンに**収まる票だけ**を各辞書候補へ集める＝橋渡ししている広い NER スパンは
+    捨てる（その実体を辞書境界で分けてマスクできる）。辞書一致が無ければ 1 件に統合。
+    """
+    dict_members = [m for m in members if _has_dict_vote(m)]
+    if not dict_members:
+        return [_merge(text, start, end, members)]
+    out: list[Candidate] = []
+    for dm in dict_members:
+        covered = [m for m in members if dm.start <= m.start and m.end <= dm.end]
+        out.append(_merge(text, dm.start, dm.end, covered))
+    return out
 
 
 def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candidate:
@@ -446,7 +474,12 @@ def _expand(
             if not any(start < er and st < end for st, er in ranges):
                 out.append(
                     Candidate(
-                        start, end, text[start:end], category, "確定", (("collected", "展開"),)
+                        start,
+                        end,
+                        text[start:end],
+                        category,
+                        "確定",
+                        (("collected", "展開"),),
                     )
                 )
                 ranges.append((start, end))
@@ -456,7 +489,9 @@ def _expand(
     return out
 
 
-def _map_span(offset_map: tuple[int, ...], start: int, end: int) -> tuple[int, int] | None:
+def _map_span(
+    offset_map: tuple[int, ...], start: int, end: int
+) -> tuple[int, int] | None:
     """平坦化テキストのスパン [start, end) を原文座標へ写す。
 
     挿入文字（区切り `、`/句点 `。`/連結改行＝対応 -1）を読み飛ばし、原文側で実体を
@@ -464,7 +499,9 @@ def _map_span(offset_map: tuple[int, ...], start: int, end: int) -> tuple[int, i
     1 つのスパンはセル内に収まり、原文範囲に `|` は挟まらない。
     """
     n = min(end, len(offset_map))
-    o_start = next((offset_map[i] for i in range(start, n) if offset_map[i] != -1), None)
+    o_start = next(
+        (offset_map[i] for i in range(start, n) if offset_map[i] != -1), None
+    )
     if o_start is None:
         return None
     o_end = next(
