@@ -134,11 +134,18 @@ class MaskEntry:
 
 @dataclass(frozen=True)
 class MaskAnalysis:
-    """解析結果（マスクはまだ適用していない。候補を選ぶ前段）。"""
+    """解析結果（マスクはまだ適用していない。候補を選ぶ前段）。
+
+    ``text``/``tokens``/``candidates`` は検出に使う**平坦化後テキスト基準**。
+    マスクは ``original_text``（平坦化前の `|` 入り原文）へ ``offset_map`` で写して当てる。
+    平坦化しない場合は ``original_text == text``・``offset_map`` は恒等写像。
+    """
 
     text: str
     tokens: tuple[AnalyzedToken, ...]
     candidates: tuple[Candidate, ...]
+    original_text: str = ""
+    offset_map: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -226,8 +233,9 @@ class MaskingEngine:
             (e.model_name, e.analyze_chunks(chunks, flatten_tables=flatten_tables))
             for e in self.engines
         ]
-        text = per_model[0][1].text
-        tokens = per_model[0][1].tokens
+        base = per_model[0][1]
+        text = base.text
+        tokens = base.tokens
 
         raw: list[Candidate] = []
 
@@ -259,7 +267,13 @@ class MaskingEngine:
                 )
 
         clusters = _cluster(text, raw)
-        return MaskAnalysis(text=text, tokens=tokens, candidates=tuple(clusters))
+        return MaskAnalysis(
+            text=text,
+            tokens=tokens,
+            candidates=tuple(clusters),
+            original_text=base.original_text or text,
+            offset_map=base.offset_map or tuple(range(len(text))),
+        )
 
     def apply(
         self,
@@ -272,6 +286,9 @@ class MaskingEngine:
 
         expand=True（既定）: 実体ごと。選んだ表層を文書内の**全出現**に展開してマスク。
         expand=False: 出現ごと。選んだスパン**だけ**をマスク（同形異義語の個別制御用）。
+
+        検出・展開は平坦化テキスト座標で行い、最後に :func:`_to_original_spans` で
+        原文座標へ写してから原文を置換する（`|` 入りの原文を保ったままマスクする）。
         """
         selected = list(selected)
         if expand:
@@ -284,12 +301,16 @@ class MaskingEngine:
         else:
             spans = selected
 
-        mapping, span_placeholder = _assign_placeholders(spans, self.dictionary)
-        masked_text = _apply_mask(analysis.text, spans, span_placeholder)
+        original_text = analysis.original_text or analysis.text
+        offset_map = analysis.offset_map or tuple(range(len(analysis.text)))
+        orig_spans = _to_original_spans(spans, original_text, offset_map)
+
+        mapping, span_placeholder = _assign_placeholders(orig_spans, self.dictionary)
+        masked_text = _apply_mask(original_text, orig_spans, span_placeholder)
         return MaskResult(
-            text=analysis.text,
+            text=original_text,
             masked_text=masked_text,
-            masked=tuple(spans),
+            masked=tuple(orig_spans),
             mapping=mapping,
         )
 
@@ -432,6 +453,43 @@ def _expand(
             i = e_tok
         else:
             i += 1
+    return out
+
+
+def _map_span(offset_map: tuple[int, ...], start: int, end: int) -> tuple[int, int] | None:
+    """平坦化テキストのスパン [start, end) を原文座標へ写す。
+
+    挿入文字（区切り `、`/句点 `。`/連結改行＝対応 -1）を読み飛ばし、原文側で実体を
+    覆う連続範囲を返す。スパン内に実体が無ければ None。検出は `、` でセルを割っているため
+    1 つのスパンはセル内に収まり、原文範囲に `|` は挟まらない。
+    """
+    n = min(end, len(offset_map))
+    o_start = next((offset_map[i] for i in range(start, n) if offset_map[i] != -1), None)
+    if o_start is None:
+        return None
+    o_end = next(
+        (offset_map[i] + 1 for i in range(n - 1, start - 1, -1) if offset_map[i] != -1),
+        None,
+    )
+    return (o_start, o_end if o_end is not None else o_start)
+
+
+def _to_original_spans(
+    spans: list[Candidate], original_text: str, offset_map: tuple[int, ...]
+) -> list[Candidate]:
+    """候補スパン（平坦化座標）を原文座標へ写し、原文の表層で作り直す。
+
+    平坦化しない場合は offset_map が恒等なので原文 = 平坦化テキストで実質そのまま。
+    """
+    out: list[Candidate] = []
+    for c in spans:
+        mapped = _map_span(offset_map, c.start, c.end)
+        if mapped is None:
+            continue
+        s, e = mapped
+        out.append(
+            Candidate(s, e, original_text[s:e], c.category, c.confidence, c.votes)
+        )
     return out
 
 

@@ -370,7 +370,7 @@ def render_masking(
         )
         if view.startswith("色付き"):
             html = render_masking_html(
-                analysis.text, [(c.start, c.end, c.category) for c in result.masked]
+                result.text, [(c.start, c.end, c.category) for c in result.masked]
             )
             st.html(
                 '<div style="height:400px; overflow:auto; resize:vertical; '

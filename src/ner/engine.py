@@ -23,7 +23,7 @@ from functools import cached_property
 
 import spacy
 
-from src.ner.preprocess import prepare_for_ner
+from src.ner.preprocess import prepare_for_ner_with_map
 
 # ja_ginza_electra（torch/thinc/huggingface）系が出す deprecation 警告を抑制する。
 # 推論のたびに大量に出る `torch.cuda.amp.autocast(...)` ほか、初回ロード時の
@@ -97,11 +97,19 @@ class Analysis:
     トークンは SudachiPy のトークナイズ（品詞つき）、entities はこのモデルの
     NER ラベル。複数モデルを併用するときは entities を和集合する（トークンは
     同じ SudachiPy なのでどれか 1 つで足りる）。
+
+    平坦化（``flatten_tables=True``）したときは、``text``/``tokens``/``entities`` は
+    すべて**平坦化後テキスト基準**。一方 ``original_text`` は平坦化前の原文（`|` 入り）、
+    ``offset_map[i]`` は ``text`` の i 文字目に対応する ``original_text`` の文字位置
+    （挿入文字は -1）。検出は平坦化テキストで行い、マスクは原文へ写して当てるため
+    （src.masking）に使う。平坦化しない場合は ``original_text == text``・恒等写像。
     """
 
     text: str
     tokens: tuple[AnalyzedToken, ...]
     entities: tuple[Entity, ...]
+    original_text: str = ""
+    offset_map: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -196,14 +204,14 @@ class NerEngine:
         Returns:
             ExtractionResult（連結した解析テキストと、位置補正済みの抽出結果）。
         """
-        # 解析する小片を確定（平文化 → バイト数安全分割 → 空片除去）
+        # 解析する小片を確定（バイト数安全分割 → 平文化 → 空片除去）
         pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
 
         # 小片ごとに NER（nlp.pipe でバッチ処理）し、全文基準にオフセット補正
         entities: list[Entity] = []
         offset = 0
         sep_len = len(CHUNK_SEPARATOR)
-        for piece, doc in zip(pieces, self.nlp.pipe(pieces)):
+        for piece, doc in zip(pieces, self.nlp.pipe([p.flat for p in pieces])):
             for ent in doc.ents:
                 entities.append(
                     Entity(
@@ -213,10 +221,10 @@ class NerEngine:
                         end=ent.end_char + offset,
                     )
                 )
-            offset += len(piece) + sep_len
+            offset += len(piece.flat) + sep_len
 
         result = ExtractionResult(
-            text=CHUNK_SEPARATOR.join(pieces),
+            text=CHUNK_SEPARATOR.join(p.flat for p in pieces),
             entities=tuple(entities),
         )
         if labels is not None:
@@ -246,7 +254,7 @@ class NerEngine:
         """
         pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
         infos: list[TokenInfo] = []
-        for doc in self.nlp.pipe(pieces):
+        for doc in self.nlp.pipe([p.flat for p in pieces]):
             for tok in doc:
                 if tok.is_space:
                     continue
@@ -277,9 +285,19 @@ class NerEngine:
         pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
         tokens: list[AnalyzedToken] = []
         entities: list[Entity] = []
-        offset = 0
+        omap: list[int] = []  # 平坦化テキストの各文字 → 原文の文字位置（挿入は -1）
+        orig_parts: list[str] = []
+        offset = 0  # 平坦化テキスト基準のオフセット（トークン/エンティティ用）
+        orig_offset = 0  # 原文基準のオフセット
         sep_len = len(CHUNK_SEPARATOR)
-        for piece, doc in zip(pieces, self.nlp.pipe(pieces)):
+        for idx, (piece, doc) in enumerate(
+            zip(pieces, self.nlp.pipe([p.flat for p in pieces]))
+        ):
+            if idx > 0:  # 小片の区切り（CHUNK_SEPARATOR）は flat/orig 双方に入る
+                omap.extend(orig_offset + k for k in range(sep_len))
+                offset += sep_len
+                orig_offset += sep_len
+                orig_parts.append(CHUNK_SEPARATOR)
             for tok in doc:
                 if tok.is_space:
                     continue
@@ -302,27 +320,47 @@ class NerEngine:
                         end=ent.end_char + offset,
                     )
                 )
-            offset += len(piece) + sep_len
+            omap.extend(orig_offset + c if c != -1 else -1 for c in piece.cmap)
+            offset += len(piece.flat)
+            orig_offset += len(piece.orig)
+            orig_parts.append(piece.orig)
         return Analysis(
-            text=CHUNK_SEPARATOR.join(pieces),
+            text=CHUNK_SEPARATOR.join(p.flat for p in pieces),
             tokens=tuple(tokens),
             entities=tuple(entities),
+            original_text="".join(orig_parts),
+            offset_map=tuple(omap),
         )
+
+
+@dataclass(frozen=True)
+class _Piece:
+    """NER に渡す 1 小片。平坦化したときは原文との対応表も持つ。"""
+
+    flat: str  # NER へ渡す（平坦化後）テキスト
+    orig: str  # 対応する原文（平坦化前。`|` 入り）
+    cmap: tuple[int, ...]  # flat の各文字 → orig の文字位置（挿入文字は -1）
 
 
 def _prepare_pieces(
     chunks: Iterable[str], *, flatten_tables: bool = False
-) -> list[str]:
+) -> list[_Piece]:
     """チャンク列を、実際に NER へ渡す小片（バイト数安全・空片除去済み）に整える。
 
     :meth:`NerEngine.extract_chunks` と :meth:`NerEngine.debug_tokens` が同じ
-    入力で解析するよう、分割処理をここに集約する。
+    入力で解析するよう、分割処理をここに集約する。平坦化はバイト数安全分割の**後**に
+    各小片へ適用し、原文（`|` 入り）と平坦化後の文字位置対応表（cmap）を保持する。
     """
-    pieces: list[str] = []
+    pieces: list[_Piece] = []
     for chunk in chunks:
-        prepared = prepare_for_ner(chunk) if flatten_tables else chunk
-        pieces.extend(_byte_safe_pieces(prepared))
-    return [p for p in pieces if p.strip()]
+        for orig in _byte_safe_pieces(chunk):
+            if flatten_tables:
+                flat, cmap = prepare_for_ner_with_map(orig)
+            else:
+                flat, cmap = orig, list(range(len(orig)))
+            if flat.strip():
+                pieces.append(_Piece(flat, orig, tuple(cmap)))
+    return pieces
 
 
 def _byte_safe_pieces(text: str, max_bytes: int = SAFE_CHUNK_BYTES) -> list[str]:
