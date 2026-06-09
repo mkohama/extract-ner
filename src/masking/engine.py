@@ -157,6 +157,19 @@ def _sudachi_category(tag: str) -> str | None:
     return None
 
 
+def vote_category(channel: str, label: str) -> str | None:
+    """監査用：1 票 (channel, label) がどのカテゴリに投票したかを引く。
+
+    候補生成（analyze）でカテゴリを決めるのと同じ対応関係を使う（重複ロジックを作らない）。
+    辞書票のラベルは ``"社名(辞書)"`` 形式なので接頭のカテゴリを取り出す。
+    """
+    if channel == "dict":
+        return label.split("(", 1)[0] or None
+    if channel == "sudachi":
+        return _sudachi_category(label)
+    return _NER_LABEL_CATEGORY.get(label.upper())
+
+
 class MaskingEngine:
     """マスキング検出エンジン。NER 両モデル ∪ Sudachi 品詞 ∪ マスク辞書で候補を作る。"""
 

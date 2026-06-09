@@ -23,7 +23,7 @@ from pathlib import Path
 import click
 from spacy import displacy
 
-from src.masking import MaskDictionary, MaskingEngine
+from src.masking import CandidateGroup, MaskDictionary, MaskingEngine, vote_category
 from src.ner import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
@@ -311,6 +311,36 @@ def debug(
         click.echo(f"\nレポートを書き出しました（UTF-8）: {out.resolve()}")
 
 
+def _audit_lines(groups: list[CandidateGroup], *, with_surface: bool) -> list[str]:
+    """各実体について「解決結果・票の分布・全票」を 1 行にする（確信度づけの監査用）。
+
+    票の分布 (by-cat) は各票 (channel, label) を vote_category でカテゴリに引き直して数える。
+    解決カテゴリが最多票でない／票が複数カテゴリに割れている実体には ``split⚠`` を付ける。
+    with_surface=True のときだけ表層を末尾に付ける（機密。共有禁止）。
+    """
+    lines: list[str] = []
+    for i, g in enumerate(groups, start=1):
+        by_cat: Counter[str] = Counter()
+        for ch, label in g.votes:
+            cat = vote_category(ch, label)
+            if cat is not None:
+                by_cat[cat] += 1
+        cat_str = "{" + ", ".join(f"{c}:{n}" for c, n in by_cat.most_common()) + "}"
+        votes_str = " ".join(f"{ch}={label}" for ch, label in g.votes)
+        split = len(by_cat) > 1 or (
+            by_cat and by_cat.most_common(1)[0][0] != g.category
+        )
+        flag = "split⚠" if split else "      "
+        line = (
+            f"#{i:03d}  resolved={g.category}/{g.confidence}  {flag}"
+            f"  by-cat={cat_str}  count={g.count}  votes=({votes_str})"
+        )
+        if with_surface:
+            line += f"  surface={g.surface!r}"
+        lines.append(line)
+    return lines
+
+
 @cli.command()
 @click.argument(
     "file", required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path)
@@ -337,6 +367,21 @@ def debug(
     type=click.Path(dir_okay=False, path_type=Path),
     help="マスク済みテキストを UTF-8 で書き出す。",
 )
+@click.option(
+    "--audit",
+    is_flag=True,
+    help="全候補（確定/強も含む）の票の分布と解決結果を出す（表層なし＝共有OK）。",
+)
+@click.option(
+    "--audit-surface",
+    is_flag=True,
+    help="監査出力に表層も付ける（機密。ローカル照合用。共有禁止）。--audit を含意。",
+)
+@click.option(
+    "--audit-out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="監査出力を UTF-8 で書き出す（--audit-surface 併用時は表層入り＝gitignore 下へ）。",
+)
 def mask(
     file: Path | None,
     text: str | None,
@@ -344,6 +389,9 @@ def mask(
     models: tuple[str, ...],
     flatten: bool,
     out: Path | None,
+    audit: bool,
+    audit_surface: bool,
+    audit_out: Path | None,
 ) -> None:
     """機密情報を検出してマスク（伏せ字）する。確定/強は自動マスク、弱はレビュー候補。"""
     chunks = _load_chunks(file, text)
@@ -383,6 +431,20 @@ def mask(
     if out is not None:
         out.write_text(result.masked_text, encoding="utf-8")
         click.echo(f"\nマスク済みテキストを書き出しました（UTF-8）: {out.resolve()}")
+
+    if audit or audit_surface or audit_out is not None:
+        lines = _audit_lines(groups, with_surface=audit_surface)
+        report = "監査（全候補・票の分布）\n" + "\n".join(lines)
+        if audit_surface:
+            click.echo(
+                "\n⚠ 表層を含む監査出力です（機密）。チャット等に貼らないでください。"
+            )
+        click.echo("\n===== 監査（全候補・票の分布） =====")
+        for line in lines:
+            click.echo(line)
+        if audit_out is not None:
+            audit_out.write_text(report + "\n", encoding="utf-8")
+            click.echo(f"\n監査出力を書き出しました（UTF-8）: {audit_out.resolve()}")
 
 
 @cli.command()
