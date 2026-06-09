@@ -49,6 +49,10 @@ _PLACEHOLDER_PREFIX = {
 # NER ラベル（大文字）→ カテゴリ。Product_Other 系（その他）は**ノイズ過多のため候補にしない**。
 # 注: 「N_*」（N_Person=人数 等）は関根体系では**数値表現（個数）**であって固有名詞ではない。
 # 人名・地名と取り違えないよう **含めない**（PERSON と N_PERSON は別物）。
+# 連絡先（Email/URL/Phone_Number）も **NER からは候補にしない**：`@TP` 等のコード式や数字に
+# 過剰発火し、両モデル一致で「連絡先/強→自動マスク」に暴発するため（Product_Other と同じ理由）。
+# 連絡先カテゴリ自体は残し、将来**正規表現で「形」から確定検出**する（メール/電話/郵便番号/型番）。
+# そもそもの自動マスク対象は 人名・社名・商標（地名は弱＝レビュー）。
 _NER_LABEL_CATEGORY: dict[str, str] = {
     "PERSON": "人名",
     "COMPANY": "社名",
@@ -75,9 +79,7 @@ _NER_LABEL_CATEGORY: dict[str, str] = {
     "FACILITY_PART": "地名",
     "STATION": "地名",
     "AIRPORT": "地名",
-    "PHONE_NUMBER": "連絡先",
-    "EMAIL": "連絡先",
-    "URL": "連絡先",
+    # 連絡先（Phone_Number/Email/URL）は意図的に含めない（上のコメント参照。正規表現に委ねる）。
 }
 
 
