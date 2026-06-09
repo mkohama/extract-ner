@@ -252,9 +252,26 @@ def _context(text: str, start: int, end: int, width: int = 20) -> str:
     return f"{head}{text[s:start]}《{text[start:end]}》{text[end:e]}{tail}"
 
 
+# 確信度の並び順（確定→強→中→弱）。文字列順だと「中→確定」になるので明示する。
+_CONFIDENCE_ORDER = {"確定": 0, "強": 1, "中": 2, "弱": 3}
+
+
+def _sorted_by_confidence(items, *, key):
+    """確信度 降順（確定→強→中→弱）→ 第2キー（表層など）昇順で並べる＝表の既定順。
+
+    items は ``.confidence`` を持つ候補 / 実体。第2キーで同じ表層が隣接する
+    （「出現ごと」では同形異義語の比較がしやすくなる）。
+    """
+    return sorted(
+        items, key=lambda it: (_CONFIDENCE_ORDER.get(it.confidence, 9), key(it))
+    )
+
+
 def _render_by_entity(engine, analysis):
     """実体ごと：同じ語は文書内の全出現を一括マスク。"""
-    groups = engine.group_candidates(analysis.candidates)
+    groups = _sorted_by_confidence(
+        engine.group_candidates(analysis.candidates), key=lambda g: g.surface
+    )
     st.subheader(f"マスク候補（{len(groups)} 実体）— チェックで選択")
     st.caption(
         "確定/強は初期チェック ON。チェックした実体は**文書内の全出現**がマスクされます。"
@@ -291,7 +308,7 @@ def _render_by_entity(engine, analysis):
 
 def _render_by_occurrence(engine, analysis):
     """出現ごと：各出現を個別にマスク（同形異義語の使い分け用）。展開せず選んだ箇所だけ。"""
-    cands = list(analysis.candidates)
+    cands = _sorted_by_confidence(list(analysis.candidates), key=lambda c: c.surface)
     st.subheader(f"マスク候補（{len(cands)} 出現）— 出現ごとに選択")
     st.caption(
         "各出現を個別にマスク（フランク=人名 vs フランクに=気軽に、等を文脈で使い分け）。"
