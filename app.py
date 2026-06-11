@@ -462,14 +462,20 @@ def render_dict_editor(dict_path: str) -> None:
         },
     )
     if st.button("💾 辞書を保存", type="primary", key="dict_save"):
+
+        def cell(value: object) -> str:
+            # data_editor の空セルは NaN（float）。`nan or ""` は nan が truthy で
+            # すり抜けて "nan" になるので、明示的に空文字へ落とす。
+            return "" if pd.isna(value) else str(value).strip()
+
         new_entries = [
             {
-                "category": (r["カテゴリ"] or "社名"),
-                "canonical": str(r["代表表記"] or "").strip(),
+                "category": cell(r["カテゴリ"]) or "社名",
+                "canonical": cell(r["代表表記"]),
                 "aliases": [
-                    a.strip() for a in str(r["別名"] or "").split(",") if a.strip()
+                    a.strip() for a in cell(r["別名"]).split(",") if a.strip()
                 ],
-                "mask": str(r["置換"] or "").strip(),
+                "mask": cell(r["置換"]),
             }
             for _, r in edited.iterrows()
         ]
