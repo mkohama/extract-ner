@@ -34,6 +34,8 @@ from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
 
 # クラスタ代表カテゴリの選択優先度（地名・その他は低い）
 _CAT_PRIORITY = ["人名", "社名", "商標", "連絡先", "地名", "その他"]
+# カテゴリ → 優先度ランク（小さいほど優先）。同点時の代表カテゴリ選択に使う。
+_CAT_RANK = {c: i for i, c in enumerate(_CAT_PRIORITY)}
 # 確信度の強さ順（集約時に最良を選ぶ）
 _CONF_RANK = {"確定": 3, "強": 2, "中": 1, "弱": 0}
 # 自動マスク（初期チェック ON）にする確信度
@@ -225,6 +227,17 @@ def _top_category(counts: Counter[str]) -> str:
     return next((c for c in _CAT_PRIORITY if c in tied), tied[0])
 
 
+def _representative(members: list[Candidate]) -> Candidate:
+    """同一表層の出現群から代表を選ぶ：確信度が最良、同点はカテゴリ優先度が高い方。
+
+    実体（表層）の代表カテゴリ・確信度を決めるのに使う（出現ごとに割れた種別を 1 つへ）。
+    """
+    return max(
+        members,
+        key=lambda m: (_CONF_RANK.get(m.confidence, 0), -_CAT_RANK.get(m.category, 99)),
+    )
+
+
 class MaskingEngine:
     """マスキング検出エンジン。NER 両モデル ∪ Sudachi 品詞 ∪ マスク辞書で候補を作る。"""
 
@@ -334,9 +347,11 @@ class MaskingEngine:
         """
         selected = list(selected)
         if expand:
-            collected: dict[str, str] = {}
+            # 表層ごとに代表カテゴリを 1 つに（出現ごとに割れた種別を実体単位へ統一）。
+            by_surface: dict[str, list[Candidate]] = {}
             for c in selected:
-                collected.setdefault(normalize(c.surface), c.category)
+                by_surface.setdefault(normalize(c.surface), []).append(c)
+            collected = {k: _representative(v).category for k, v in by_surface.items()}
             spans = selected + _expand(
                 analysis.text, analysis.tokens, collected, selected
             )
@@ -357,19 +372,18 @@ class MaskingEngine:
         )
 
     def group_candidates(self, candidates: Iterable[Candidate]) -> list[CandidateGroup]:
-        """候補を実体（カテゴリ×代表表記）ごとにまとめる。
+        """候補を実体（**表層**）ごとにまとめる。
 
-        出現ごとの候補を 1 実体 1 行にする（confidence は最良、votes は和集合）。
-        マスクは実体ごとなので、UI/CLI はこの単位で「選ぶ/見せる」のが正しい。
+        **同じ表層は 1 実体に集約**する（マスクは表層＝トークン単位で効くため、カテゴリが
+        出現ごとに割れていても 1 つにまとめる）。実体のカテゴリ・確信度は代表（確信度最良・
+        同点はカテゴリ優先）を採る。confidence は最良、votes は和集合。
+        出現ごとの個別判断は :data:`MaskAnalysis.candidates`（出現ごとモード）が担う。
         """
-        groups: dict[tuple[str, str], list[Candidate]] = {}
-        order: list[tuple[str, str]] = []
+        groups: dict[str, list[Candidate]] = {}
+        order: list[str] = []
         for c in candidates:
             canonical = self.dictionary.canonical_of(c.surface)
-            key = (
-                c.category,
-                normalize(canonical) if canonical else normalize(c.surface),
-            )
+            key = normalize(canonical) if canonical else normalize(c.surface)
             if key not in groups:
                 groups[key] = []
                 order.append(key)
@@ -378,7 +392,7 @@ class MaskingEngine:
         result: list[CandidateGroup] = []
         for key in order:
             members = groups[key]
-            best = max(members, key=lambda m: _CONF_RANK.get(m.confidence, 0))
+            best = _representative(members)
             votes = tuple(dict.fromkeys(v for m in members for v in m.votes))
             canonical = self.dictionary.canonical_of(best.surface)
             result.append(
@@ -668,17 +682,17 @@ def _assign_placeholders(
 ) -> tuple[tuple[MaskEntry, ...], dict[tuple[int, int], str]]:
     """(カテゴリ, 代表表記) ごとにプレースホルダを割り当てる。
 
-    辞書にある語は canonical（代表表記）で束ね、表記ゆれ（英語表記↔カタカナ表記・略称・旧称）を
-    同じプレースホルダに統一する。辞書外は正規化表層で束ねる。
+    **同じ表層（canonical）は 1 プレースホルダに統一**する（カテゴリが出現ごとに割れていても
+    1 つにまとめる＝表層単位でマスク、と整合）。実体のカテゴリは代表（確信度最良・同点は優先）を採る。
+    表記ゆれ（英語表記↔カタカナ表記・略称・旧称）も canonical で同じプレースホルダに寄る。
     辞書で**置換語（mask）が指定**された実体は、自動採番でなくその語を使う（未指定は自動採番）。
     """
-    groups: dict[tuple[str, str], list[Candidate]] = {}
-    order: list[tuple[str, str]] = []
-    group_canonical: dict[tuple[str, str], str | None] = {}
+    groups: dict[str, list[Candidate]] = {}
+    order: list[str] = []
+    group_canonical: dict[str, str | None] = {}
     for sp in spans:
         canonical = dictionary.canonical_of(sp.surface)
-        key_str = normalize(canonical) if canonical else normalize(sp.surface)
-        key = (sp.category, key_str)
+        key = normalize(canonical) if canonical else normalize(sp.surface)
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -689,7 +703,8 @@ def _assign_placeholders(
     span_placeholder: dict[tuple[int, int], str] = {}
     mapping: list[MaskEntry] = []
     for key in order:
-        category = key[0]
+        members = groups[key]
+        category = _representative(members).category
         canonical = group_canonical[key]
         custom = dictionary.custom_placeholder(canonical) if canonical else None
         if custom:
@@ -698,9 +713,9 @@ def _assign_placeholders(
             counters[category] = counters.get(category, 0) + 1
             prefix = _PLACEHOLDER_PREFIX.get(category, "語")
             placeholder = f"[{prefix}{counters[category]}]"
-        surfaces = tuple(dict.fromkeys(sp.surface for sp in groups[key]))
+        surfaces = tuple(dict.fromkeys(sp.surface for sp in members))
         mapping.append(MaskEntry(placeholder, category, surfaces))
-        for sp in groups[key]:
+        for sp in members:
             span_placeholder[(sp.start, sp.end)] = placeholder
     return tuple(mapping), span_placeholder
 
