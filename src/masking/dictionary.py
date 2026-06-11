@@ -150,6 +150,9 @@ def load_entries(path: str | Path) -> list[dict]:
 
     返り値は ``{"category", "canonical", "aliases": list[str], "mask": str}`` の列。
     （:meth:`MaskDictionary.load` はこれを正規化表層マップに畳む）
+
+    旧バグで置換に書かれてしまった文字列 ``"nan"`` は空（未指定）として読み込む（自己修復。
+    再保存すれば YAML からも消える）。
     """
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     entries: list[dict] = []
@@ -161,12 +164,15 @@ def load_entries(path: str | Path) -> list[dict]:
                     {"category": category, "canonical": item, "aliases": [], "mask": ""}
                 )
             else:
+                mask = str(item.get("mask") or "")
+                if mask.strip().lower() == "nan":  # 旧バグの掃除
+                    mask = ""
                 entries.append(
                     {
                         "category": category,
                         "canonical": item.get("canonical") or item.get("name") or "",
                         "aliases": list(item.get("aliases") or []),
-                        "mask": item.get("mask") or "",
+                        "mask": mask,
                     }
                 )
     return entries
