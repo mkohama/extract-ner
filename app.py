@@ -15,7 +15,13 @@ import pandas as pd
 import streamlit as st
 
 from src.core.document.document_loader import DocumentLoader
-from src.masking import AUTO_MASK_CONFIDENCE, MaskDictionary, MaskingEngine
+from src.masking import (
+    AUTO_MASK_CONFIDENCE,
+    MaskDictionary,
+    MaskingEngine,
+    load_entries,
+    save_entries,
+)
 from src.ner import (
     AVAILABLE_MODELS,
     NerEngine,
@@ -56,17 +62,28 @@ def get_engine(model_name: str) -> NerEngine:
 _DEFAULT_DICT = Path(__file__).resolve().parent / "data" / "mask_dict.yaml"
 
 
-@st.cache_resource(show_spinner="モデル・マスク辞書を読み込み中 ...")
-def get_masking_engine(models: tuple[str, ...], dict_path: str) -> MaskingEngine:
-    """マスキングエンジンを生成・キャッシュする（モデル・辞書もここでロード）。"""
-    dictionary = (
-        MaskDictionary.load(dict_path)
-        if dict_path and Path(dict_path).exists()
-        else MaskDictionary.empty()
-    )
-    engine = MaskingEngine(dictionary=dictionary, models=list(models))
+@st.cache_resource(show_spinner="モデルを読み込み中 ...")
+def _masking_engine_for_models(models: tuple[str, ...]) -> MaskingEngine:
+    """モデルだけを読み込んだマスキングエンジン（重いのでキャッシュ。辞書は都度差し替える）。"""
+    engine = MaskingEngine(dictionary=MaskDictionary.empty(), models=list(models))
     for e in engine.engines:
         _ = e.nlp  # 先にロード
+    return engine
+
+
+def _load_dictionary(dict_path: str) -> MaskDictionary:
+    if dict_path and Path(dict_path).exists():
+        return MaskDictionary.load(dict_path)
+    return MaskDictionary.empty()
+
+
+def get_masking_engine(models: tuple[str, ...], dict_path: str) -> MaskingEngine:
+    """マスキングエンジンを返す。モデルはキャッシュ、**辞書は毎回読み直して差し替える**。
+
+    辞書編集 UI で保存した直後の再実行でも、モデルを再ロードせずに新しい辞書が反映される。
+    """
+    engine = _masking_engine_for_models(tuple(models))
+    engine.dictionary = _load_dictionary(dict_path)
     return engine
 
 
@@ -379,6 +396,59 @@ def _render_by_occurrence(engine, analysis):
     return engine.apply(analysis, selected, expand=False)
 
 
+def render_dict_editor(dict_path: str) -> None:
+    """マスク辞書の確認・追加・編集・保存 UI（マスキングモード内の expander）。
+
+    行を編集/追加/削除して保存すると `data/mask_dict.yaml`（dict_path）へ書き出す。
+    「置換」列に値を入れると、その実体のマスク後の伏せ字を固定できる（空なら自動採番）。
+    """
+    with st.expander("🗂 マスク辞書（確認・追加・編集・保存）", expanded=False):
+        st.caption(
+            "カテゴリ / 代表表記 / 別名（カンマ区切り）/ 置換（任意。空なら `[社1]` 等を自動採番）。"
+            "行の追加・削除も可。**保存先はローカルの辞書ファイル**（機密・git 管理外）。"
+        )
+        path = Path(dict_path)
+        entries = load_entries(path) if path.exists() else []
+        rows = [
+            {
+                "カテゴリ": e["category"],
+                "代表表記": e["canonical"],
+                "別名": ", ".join(e["aliases"]),
+                "置換": e["mask"],
+            }
+            for e in entries
+        ]
+        df = pd.DataFrame(rows, columns=["カテゴリ", "代表表記", "別名", "置換"])
+        edited = st.data_editor(
+            df,
+            num_rows="dynamic",
+            width="stretch",
+            key="dict_editor",
+            column_config={
+                "カテゴリ": st.column_config.SelectboxColumn(
+                    "カテゴリ", options=["社名", "商標", "人名"], default="社名"
+                ),
+                "置換": st.column_config.TextColumn("置換", help="空なら自動採番"),
+            },
+        )
+        if st.button("💾 辞書を保存", type="primary", key="dict_save"):
+            new_entries = [
+                {
+                    "category": (r["カテゴリ"] or "社名"),
+                    "canonical": str(r["代表表記"] or "").strip(),
+                    "aliases": [
+                        a.strip() for a in str(r["別名"] or "").split(",") if a.strip()
+                    ],
+                    "mask": str(r["置換"] or "").strip(),
+                }
+                for _, r in edited.iterrows()
+            ]
+            kept = [e for e in new_entries if e["canonical"]]
+            save_entries(path, kept)
+            st.success(f"保存しました: {path}（{len(kept)} 件）")
+            st.rerun()
+
+
 def render_masking(
     chunks: list[str],
     source_label: str,
@@ -388,6 +458,7 @@ def render_masking(
     dict_path: str,
 ) -> None:
     """マスキングモードの表示。候補をチェックで選び（確定/強は初期 ON）、選んだ分をマスクする。"""
+    render_dict_editor(dict_path)
     engine = get_masking_engine(tuple(models), dict_path)
     with st.spinner(f"検出中 ...（{len(chunks)} チャンク）"):
         analysis = engine.analyze(chunks, flatten_tables=flatten_tables)

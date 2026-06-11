@@ -670,9 +670,11 @@ def _assign_placeholders(
 
     辞書にある語は canonical（代表表記）で束ね、表記ゆれ（英語表記↔カタカナ表記・略称・旧称）を
     同じプレースホルダに統一する。辞書外は正規化表層で束ねる。
+    辞書で**置換語（mask）が指定**された実体は、自動採番でなくその語を使う（未指定は自動採番）。
     """
     groups: dict[tuple[str, str], list[Candidate]] = {}
     order: list[tuple[str, str]] = []
+    group_canonical: dict[tuple[str, str], str | None] = {}
     for sp in spans:
         canonical = dictionary.canonical_of(sp.surface)
         key_str = normalize(canonical) if canonical else normalize(sp.surface)
@@ -680,6 +682,7 @@ def _assign_placeholders(
         if key not in groups:
             groups[key] = []
             order.append(key)
+            group_canonical[key] = canonical
         groups[key].append(sp)
 
     counters: dict[str, int] = {}
@@ -687,9 +690,14 @@ def _assign_placeholders(
     mapping: list[MaskEntry] = []
     for key in order:
         category = key[0]
-        counters[category] = counters.get(category, 0) + 1
-        prefix = _PLACEHOLDER_PREFIX.get(category, "語")
-        placeholder = f"[{prefix}{counters[category]}]"
+        canonical = group_canonical[key]
+        custom = dictionary.custom_placeholder(canonical) if canonical else None
+        if custom:
+            placeholder = custom
+        else:
+            counters[category] = counters.get(category, 0) + 1
+            prefix = _PLACEHOLDER_PREFIX.get(category, "語")
+            placeholder = f"[{prefix}{counters[category]}]"
         surfaces = tuple(dict.fromkeys(sp.surface for sp in groups[key]))
         mapping.append(MaskEntry(placeholder, category, surfaces))
         for sp in groups[key]:

@@ -6,7 +6,13 @@
     MaskDictionary : マスク辞書（社名・商標・人名の登録リスト）
 """
 
-from src.masking.dictionary import DictMatch, MaskDictionary, normalize
+from src.masking.dictionary import (
+    DictMatch,
+    MaskDictionary,
+    load_entries,
+    normalize,
+    save_entries,
+)
 from src.masking.engine import (
     AUTO_MASK_CONFIDENCE,
     Candidate,
@@ -32,4 +38,6 @@ __all__ = [
     "normalize",
     "vote_category",
     "tally_votes",
+    "load_entries",
+    "save_entries",
 ]

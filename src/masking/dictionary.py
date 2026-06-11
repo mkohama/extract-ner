@@ -47,10 +47,16 @@ class DictMatch:
 
 
 class MaskDictionary:
-    """正規化表層 → (canonical, category) の対応表。"""
+    """正規化表層 → (canonical, category) の対応表（＋任意の置換語）。"""
 
-    def __init__(self, surface_map: dict[str, tuple[str, str]]) -> None:
+    def __init__(
+        self,
+        surface_map: dict[str, tuple[str, str]],
+        placeholders: dict[str, str] | None = None,
+    ) -> None:
         self._map = surface_map
+        # canonical → 置換語（マスク後の伏せ字）。指定が無い canonical は自動採番に従う。
+        self._placeholders = placeholders or {}
 
     @classmethod
     def empty(cls) -> MaskDictionary:
@@ -58,23 +64,22 @@ class MaskDictionary:
 
     @classmethod
     def load(cls, path: str | Path) -> MaskDictionary:
-        """YAML を読み込んでマスク辞書を作る。"""
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        """YAML を読み込んでマスク辞書を作る。
+
+        各エントリは文字列（canonical のみ）か、``canonical``/``aliases``/``mask`` を持つ辞書。
+        ``mask`` を指定すると、その実体のマスク後の置換語を固定できる（未指定なら自動採番）。
+        """
         surface_map: dict[str, tuple[str, str]] = {}
-        for section, items in data.items():
-            category = _SECTION_CATEGORY.get(section, section)
-            for item in items or []:
-                aliases: list[str]
-                if isinstance(item, str):
-                    canonical, aliases = item, []
-                else:
-                    canonical = item.get("canonical") or item.get("name") or ""
-                    aliases = item.get("aliases") or []
-                if not canonical:
-                    continue
-                for surface in [canonical, *aliases]:
-                    surface_map[normalize(surface)] = (canonical, category)
-        return cls(surface_map)
+        placeholders: dict[str, str] = {}
+        for entry in load_entries(path):
+            canonical, category = entry["canonical"], entry["category"]
+            if not canonical:
+                continue
+            for surface in [canonical, *entry["aliases"]]:
+                surface_map[normalize(surface)] = (canonical, category)
+            if entry.get("mask"):
+                placeholders[canonical] = entry["mask"]
+        return cls(surface_map, placeholders)
 
     def canonical_of(self, surface: str) -> str | None:
         """表層に対応する canonical（代表表記）を返す。辞書に無ければ None。
@@ -84,6 +89,10 @@ class MaskDictionary:
         """
         entry = self._map.get(normalize(surface))
         return entry[0] if entry is not None else None
+
+    def custom_placeholder(self, canonical: str) -> str | None:
+        """canonical に対して指定された置換語（あれば）。無ければ None（自動採番に従う）。"""
+        return self._placeholders.get(canonical)
 
     def __bool__(self) -> bool:
         return bool(self._map)
@@ -130,3 +139,69 @@ class MaskDictionary:
             else:
                 i += 1
         return matches
+
+
+# YAML セクション名（カテゴリ → 書き出し時のセクション）。読み込みは _SECTION_CATEGORY で吸収。
+_CATEGORY_SECTION = {"社名": "社名", "商標": "商標", "人名": "人名"}
+
+
+def load_entries(path: str | Path) -> list[dict]:
+    """YAML を**構造のまま**読み込む（UI 編集・round-trip 用）。
+
+    返り値は ``{"category", "canonical", "aliases": list[str], "mask": str}`` の列。
+    （:meth:`MaskDictionary.load` はこれを正規化表層マップに畳む）
+    """
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    entries: list[dict] = []
+    for section, items in raw.items():
+        category = _SECTION_CATEGORY.get(section, section)
+        for item in items or []:
+            if isinstance(item, str):
+                entries.append(
+                    {"category": category, "canonical": item, "aliases": [], "mask": ""}
+                )
+            else:
+                entries.append(
+                    {
+                        "category": category,
+                        "canonical": item.get("canonical") or item.get("name") or "",
+                        "aliases": list(item.get("aliases") or []),
+                        "mask": item.get("mask") or "",
+                    }
+                )
+    return entries
+
+
+def save_entries(path: str | Path, entries: list[dict]) -> None:
+    """構造化エントリを YAML に書き出す（UI 保存用）。
+
+    canonical が空のエントリは捨てる。別名・置換が無ければ文字列だけの簡潔形で書く。
+    セクション順は 社名 → 商標 → 人名 →（その他）。
+    """
+    sections: dict[str, list] = {}
+    for e in entries:
+        canonical = (e.get("canonical") or "").strip()
+        if not canonical:
+            continue
+        category = e.get("category") or "社名"
+        section = _CATEGORY_SECTION.get(category, category)
+        aliases = [a.strip() for a in (e.get("aliases") or []) if a.strip()]
+        mask = (e.get("mask") or "").strip()
+        item: dict | str
+        if aliases or mask:
+            obj: dict = {"canonical": canonical}
+            if aliases:
+                obj["aliases"] = aliases
+            if mask:
+                obj["mask"] = mask
+            item = obj
+        else:
+            item = canonical
+        sections.setdefault(section, []).append(item)
+
+    ordered = {s: sections[s] for s in ("社名", "商標", "人名") if s in sections}
+    ordered.update({s: v for s, v in sections.items() if s not in ordered})
+    Path(path).write_text(
+        yaml.safe_dump(ordered, allow_unicode=True, sort_keys=False, indent=2),
+        encoding="utf-8",
+    )
