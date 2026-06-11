@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 import tempfile
 from pathlib import Path
 
@@ -24,6 +26,8 @@ from src.masking import (
 )
 from src.ner import (
     AVAILABLE_MODELS,
+    DEFAULT_COLOR,
+    MASKING_CATEGORY_COLORS,
     NerEngine,
     build_color_map,
     render_html,
@@ -192,6 +196,38 @@ def get_input_chunks(input_mode: str) -> tuple[list[str] | None, str]:
     return None, ""
 
 
+def _readable_text_block(
+    text: str, *, placeholders: dict[str, str] | None = None, height: int = 400
+) -> str:
+    """読み取り専用テキストを、グレーアウトしない読める div にする HTML を返す。
+
+    `st.text_area(disabled=True)` は背景・文字ともグレーで編集不可カーソルになり読みにくい。
+    代わりに通常色・選択可・改行保持の div で表示する。``placeholders``（プレースホルダ→
+    カテゴリ）を渡すと、マスク後の伏せ字をカテゴリ色で強調し「どこが変わったか」を見せる。
+    """
+    escaped = html.escape(text)
+    if placeholders:
+        pattern = re.compile(
+            "|".join(re.escape(p) for p in sorted(placeholders, key=len, reverse=True))
+        )
+
+        def _repl(mo: re.Match) -> str:
+            ph = mo.group(0)
+            color = MASKING_CATEGORY_COLORS.get(placeholders.get(ph, ""), DEFAULT_COLOR)
+            return (
+                f'<mark style="background:{color}; color:#000; '
+                f'padding:0 .15em; border-radius:3px;">{ph}</mark>'
+            )
+
+        escaped = pattern.sub(_repl, escaped)
+    return (
+        f'<div style="height:{height}px; overflow:auto; resize:vertical; '
+        "white-space:pre-wrap; word-break:break-word; line-height:1.9; "
+        'border:1px solid rgba(128,128,128,0.25); border-radius:6px; padding:0.6em;">'
+        f"{escaped}</div>"
+    )
+
+
 def _render_extracted_text(chunks: list[str]) -> None:
     """テキスト化された平文（チャンク連結）を確認用に表示する。
 
@@ -205,13 +241,7 @@ def _render_extracted_text(chunks: list[str]) -> None:
         f"📄 テキスト化結果（平文 / {len(chunks)} チャンク・{len(text)} 文字）を確認",
         expanded=False,
     ):
-        st.text_area(
-            "抽出テキスト",
-            value=shown,
-            height=300,
-            disabled=True,
-            label_visibility="collapsed",
-        )
+        st.html(_readable_text_block(shown, height=300))
         st.download_button(
             "⬇ 平文をダウンロード",
             text,
@@ -500,15 +530,11 @@ def render_masking(
                 "line-height:2.2; border:1px solid rgba(128,128,128,0.25); "
                 f'border-radius:6px; padding:0.5em;">{html}</div>'
             )
+        elif view.startswith("マスク"):
+            placeholders = {m.placeholder: m.category for m in result.mapping}
+            st.html(_readable_text_block(result.masked_text, placeholders=placeholders))
         else:
-            shown = result.masked_text if view.startswith("マスク") else result.text
-            st.text_area(
-                "テキスト",
-                value=shown,
-                height=400,
-                disabled=True,
-                label_visibility="collapsed",
-            )
+            st.html(_readable_text_block(result.text))
         st.download_button(
             "⬇ マスク済みテキストをダウンロード",
             result.masked_text,
