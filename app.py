@@ -24,7 +24,9 @@ from src.masking import (
     MaskAllowlist,
     MaskDictionary,
     MaskingEngine,
+    NerCache,
     apply_allowlist_to_analysis,
+    content_hash,
     load_allowlist_entries,
     load_entries,
     save_allowlist_entries,
@@ -68,9 +70,16 @@ def get_engine(model_name: str) -> NerEngine:
     return engine
 
 
-# マスク辞書・除外リストの既定パス（ルート直下 data/）
+# マスク辞書・除外リスト・キャッシュの既定パス（ルート直下 data/）
 _DEFAULT_DICT = Path(__file__).resolve().parent / "data" / "mask_dict.yaml"
 _DEFAULT_ALLOWLIST = Path(__file__).resolve().parent / "data" / "mask_allowlist.yaml"
+_DEFAULT_CACHE_DB = Path(__file__).resolve().parent / "data" / "cache.db"
+
+
+@st.cache_resource(show_spinner=False)
+def _ner_cache() -> NerCache:
+    """NER 層キャッシュ（解析過程の高速化）。SQLite 接続は軽いがインスタンスは共有する。"""
+    return NerCache(_DEFAULT_CACHE_DB)
 
 
 def _load_allowlist(allowlist_path: str) -> MaskAllowlist:
@@ -614,6 +623,55 @@ def render_dict_editor(dict_path: str) -> None:
         st.success(f"保存しました: {path}（{len(kept)} 件）")
 
 
+def render_cache_view() -> None:
+    """キャッシュ済み文書の一覧・削除（🗂 キャッシュ モード）。"""
+    cache = _ner_cache()
+    docs = cache.list_documents()
+    if not docs:
+        st.info(
+            "キャッシュはまだありません。マスキングで文書を解析すると、NER 結果が自動で"
+            "登録され、次回以降の解析が高速になります。"
+        )
+        return
+
+    def _short_models(models: tuple[str, ...]) -> str:
+        names = {"ja_ginza_electra": "electra", "ja_ginza": "ginza"}
+        return ", ".join(names.get(m, m) for m in models)
+
+    st.caption(f"キャッシュ済み: {len(docs)} 文書")
+    df = pd.DataFrame(
+        [
+            {
+                "削除": False,
+                "ソース": d.source_name,
+                "種別": d.source_kind,
+                "チャンク": d.chunk_count,
+                "文字数": d.char_count,
+                "モデル": _short_models(d.models),
+                "解析日時": d.created_at,
+                "hash": d.content_hash[:12],
+            }
+            for d in docs
+        ]
+    )
+    edited = st.data_editor(
+        df,
+        hide_index=True,
+        width="stretch",
+        disabled=[c for c in df.columns if c != "削除"],
+        column_config={"削除": st.column_config.CheckboxColumn("削除")},
+        key="cache_view",
+    )
+    to_delete = [d for d, on in zip(docs, edited["削除"].tolist()) if on]
+    if to_delete and st.button(
+        f"🗑 選択した {len(to_delete)} 件のキャッシュを削除", type="primary"
+    ):
+        for d in to_delete:
+            cache.delete(d.content_hash)
+        st.success(f"{len(to_delete)} 件のキャッシュを削除しました。")
+        st.rerun()
+
+
 def render_allowlist_editor(allowlist_path: str) -> None:
     """除外リストの確認・追加・編集・保存 UI（独立タブ）。
 
@@ -661,6 +719,7 @@ def analyze_masking(
         chunks,
         flatten_tables=flatten_tables,
         allowlist=allowlist,
+        ner_cache=_ner_cache(),
         progress=_stage_callback(status, len(chunks)),
     )
     status.empty()
@@ -806,18 +865,31 @@ def main() -> None:
             "（OFF でマスキングに戻る）。",
         )
 
-    dict_mode = allowlist_mode = False
+    dict_mode = allowlist_mode = cache_mode = False
     if ner_tool:
         masking_mode = False  # モード行は出さず、共通フローを NER 経路で通す
     else:
         mode = st.radio(
             "モード",
-            ["🔒 マスキング", "📒 マスク辞書", "🚫 除外リスト"],
+            ["🔒 マスキング", "📒 マスク辞書", "🚫 除外リスト", "🗂 キャッシュ"],
             horizontal=True,
         )
         masking_mode = mode.startswith("🔒")
         dict_mode = mode.startswith("📒")
         allowlist_mode = mode.startswith("🚫")
+        cache_mode = mode.startswith("🗂")
+
+        # --- キャッシュ一覧モード（解析済み文書の確認・削除） ---
+        if cache_mode:
+            with st.sidebar:
+                st.header("⚙️ 設定")
+            st.title("🗂 キャッシュ")
+            st.caption(
+                "解析（NER）をキャッシュ済みの文書一覧。再解析は NER をスキップして高速になります。"
+                "削除すると次回はフル解析に戻ります。**ローカル専用**（`data/cache.db`・git 管理外）。"
+            )
+            render_cache_view()
+            return
         # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
         if dict_mode:
             with st.sidebar:
@@ -983,6 +1055,14 @@ def main() -> None:
                         "dict_path": dict_path,
                         "allowlist_path": allowlist_path,
                     }
+                    # キャッシュ一覧用に文書メタを記録（NER 層は engine 側で自動保存済み）。
+                    _ner_cache().record_document(
+                        content_hash(chunks),
+                        in_kind,
+                        src_label or "(無題)",
+                        sum(len(c) for c in chunks),
+                        len(chunks),
+                    )
                 else:
                     result, elapsed = analyze_ner(chunks, model_name, flatten_tables)
                     st.session_state[slot] = {

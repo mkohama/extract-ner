@@ -11,6 +11,7 @@ from src.masking.allowlist import (
     load_allowlist_entries,
     save_allowlist_entries,
 )
+from src.masking.cache import NerCache, content_hash
 from src.masking.dictionary import (
     DictMatch,
     MaskDictionary,
@@ -52,4 +53,6 @@ __all__ = [
     "save_allowlist_entries",
     "apply_allowlist",
     "apply_allowlist_to_analysis",
+    "NerCache",
+    "content_hash",
 ]

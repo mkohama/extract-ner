@@ -35,5 +35,8 @@ testdata/
 data/*.yaml
 !data/*.sample.yaml
 
+# 解析/確定キャッシュ（実データの NER 結果・マスクを含む）はコミットしない。
+data/cache.db
+
 # Office の一時ロックファイル
 ~$*

@@ -37,6 +37,7 @@ from dataclasses import dataclass, replace
 from time import perf_counter
 
 from src.masking.allowlist import MaskAllowlist
+from src.masking.cache import NerCache, content_hash
 from src.masking.dictionary import MAX_MATCH_TOKENS, MaskDictionary, normalize
 from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
 from src.ner.engine import Analysis, ProgressCallback
@@ -306,6 +307,7 @@ class MaskingEngine:
         promote: bool = True,
         extra_terms: Iterable[tuple[str, str]] = (),
         allowlist: MaskAllowlist | None = None,
+        ner_cache: NerCache | None = None,
         progress: ProgressCallback | None = None,
     ) -> MaskAnalysis:
         """全候補（確信度・各票の判定つき）を作る。マスクはまだ適用しない。
@@ -324,13 +326,31 @@ class MaskingEngine:
         n_models = len(self.engines)
         n_stages = n_models + 1  # 各モデル ＋ 候補集約
 
+        # NER 層（激重）を (content_hash, model, flatten) でキャッシュ。ヒットすれば GiNZA を
+        #   スキップ。マスキング層（下の候補生成）は辞書/除外に依存するので毎回再計算する。
+        chash = content_hash(chunks) if ner_cache is not None else ""
         per_model: list[tuple[str, Analysis]] = []
         timings: list[tuple[str, float]] = []
         for idx, e in enumerate(self.engines):
+            cached = (
+                ner_cache.get(chash, e.model_name, flatten_tables)
+                if ner_cache is not None
+                else None
+            )
             if progress is not None:  # 重い解析の前にこの段階を表示（実行中に見える）
-                progress(idx, n_stages, f"{e.model_name} で解析中")
+                label = f"{e.model_name} を解析" + (
+                    "（キャッシュ）" if cached else "中"
+                )
+                progress(idx, n_stages, label)
             t0 = perf_counter()
-            a = e.analyze_chunks(chunks, flatten_tables=flatten_tables)
+            if cached is not None:
+                a = cached
+            else:
+                a = e.analyze_chunks(chunks, flatten_tables=flatten_tables)
+                if (
+                    ner_cache is not None
+                ):  # 未確定でも解析過程として保存（再解析を一瞬に）
+                    ner_cache.put(chash, e.model_name, flatten_tables, a)
             timings.append((e.model_name, perf_counter() - t0))
             per_model.append((e.model_name, a))
         if progress is not None:
