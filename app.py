@@ -228,15 +228,24 @@ def render_input(
             ),
         )
         d = docs[idx]
+        # チャンク本文を先読み（軽い）。無ければ古いエントリ＝選べないので明示する。
+        cached_chunks = _ner_cache().get_chunks(d.content_hash)
+        if not cached_chunks:
+            st.warning(
+                "このキャッシュにはチャンク本文がありません（チャンク保存より前の古いエントリ）。"
+                "一度ふつうに解析し直すと、以降ここから選べます。"
+            )
+            return None, "cache", d.source_name, None
         st.caption(
             "保存チャンクで再解析します。NER はキャッシュにヒットして高速"
             "（辞書・除外リストの変更は反映されます）。"
         )
-
-        def get_cache_chunks(h=d.content_hash) -> list[str]:
-            return _ner_cache().get_chunks(h) or []
-
-        return ("cache", d.content_hash), "cache", d.source_name, get_cache_chunks
+        return (
+            ("cache", d.content_hash),
+            "cache",
+            d.source_name,
+            (lambda c=cached_chunks: c),
+        )
 
     # テキスト入力（単一チャンクとして扱う。長文でもエンジン側で安全分割される）
     input_text = st.text_area("解析するテキスト", value=SAMPLE_TEXT, height=200)
