@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import re
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -116,23 +117,35 @@ def _kb_doc_label(meta: dict) -> str:
     return f"{name}　({path})" if path else str(name)
 
 
-def get_input_chunks(input_mode: str) -> tuple[list[str] | None, str]:
-    """入力方法に応じて解析対象チャンク（テキストのリスト）とソース名を返す。"""
+def render_input(
+    input_mode: str,
+) -> tuple[tuple | None, str, str, Callable[[], list[str]] | None]:
+    """入力ウィジェットを描画し、解析に必要な情報を返す。
+
+    重いテキスト化／ダウンロードは**ここでは行わず**、``get_chunks`` 呼び出しに遅延させる
+    （実際にチャンクを取り出すのは「解析する」ボタンが押されたときだけ）。
+
+    戻り値 ``(input_id, input_kind, source_label, get_chunks)``：
+      - ``input_id``  … 入力の同一性を表すハッシュ可能なタプル（署名に使う）。
+                        入力未確定なら ``None``（解析不可）。
+      - ``input_kind``… ``"text" / "file" / "kb"``（平文プレビューの要否判定に使う）。
+      - ``source_label``… 結果見出しに出す表示名。
+      - ``get_chunks``… 呼ぶとチャンク列を返す callable（未確定なら ``None``）。
+    """
     if input_mode.startswith("📄"):
         uploaded_file = st.file_uploader(
             f"対応形式: {', '.join(SUPPORTED_EXTENSIONS)}",
             type=SUPPORTED_EXTENSIONS,
         )
         if uploaded_file is not None:
-            with st.spinner("ファイルをテキスト化・チャンク化中 ..."):
-                try:
-                    return (
-                        extract_chunks_from_upload(uploaded_file),
-                        uploaded_file.name,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"ファイルの読み込みに失敗しました: {e}")
-        return None, ""
+            input_id = ("file", uploaded_file.name, uploaded_file.size)
+
+            def get_file_chunks(f=uploaded_file) -> list[str]:
+                with st.spinner("ファイルをテキスト化・チャンク化中 ..."):
+                    return extract_chunks_from_upload(f)
+
+            return input_id, "file", uploaded_file.name, get_file_chunks
+        return None, "file", "", None
 
     if input_mode.startswith("📚"):
         url = st.text_input(
@@ -154,10 +167,10 @@ def get_input_chunks(input_mode: str) -> tuple[list[str] | None, str]:
                 "kb-mcp サーバを起動し（`uv run kb-mcp-server --transport http --port 8000`）、"
                 "[文書リストを取得] を押してください。"
             )
-            return None, ""
+            return None, "kb", "", None
         if not docs:
             st.warning("kb-mcp に登録された文書がありません。")
-            return None, ""
+            return None, "kb", "", None
 
         idx = st.selectbox(
             "文書を選択",
@@ -166,34 +179,31 @@ def get_input_chunks(input_mode: str) -> tuple[list[str] | None, str]:
         )
         meta = docs[idx]
         doc_id = meta.get("id") or meta.get("document_id")
+        if not doc_id:
+            return None, "kb", "", None
 
-        # 明示的にボタンを押したときだけダウンロード＆解析する
-        if st.button(
-            "選択した文書をダウンロードして解析",
-            type="primary",
-            disabled=not doc_id,
-        ):
-            try:
-                with st.spinner("本文を取得中 ..."):
-                    st.session_state["kb_chunks"] = fetch_kb_document_chunks(
-                        url, doc_id
-                    )
-                    st.session_state["kb_source"] = _kb_doc_label(meta)
-            except Exception as e:  # noqa: BLE001
-                st.session_state.pop("kb_chunks", None)
-                st.error(f"本文の取得に失敗しました: {e}")
+        label = _kb_doc_label(meta)
 
-        # 取得済みの本文があれば返す (ラベル絞り込み等の再実行でも保持される)
-        if st.session_state.get("kb_chunks"):
-            return st.session_state["kb_chunks"], st.session_state.get("kb_source", "")
-        st.info("文書を選択して [ダウンロードして解析] を押してください。")
-        return None, ""
+        def get_kb_chunks(u=url, d=doc_id) -> list[str]:
+            with st.spinner("本文を取得中 ..."):
+                return fetch_kb_document_chunks(u, d)
+
+        return ("kb", url, doc_id), "kb", label, get_kb_chunks
 
     # テキスト入力（単一チャンクとして扱う。長文でもエンジン側で安全分割される）
     input_text = st.text_area("解析するテキスト", value=SAMPLE_TEXT, height=200)
     if input_text.strip():
-        return [input_text], "入力テキスト"
-    return None, ""
+        return ("text", input_text), "text", "入力テキスト", (lambda t=input_text: [t])
+    return None, "text", "", None
+
+
+def _dict_signature(dict_path: str) -> tuple[str, float | None]:
+    """辞書ファイルの同一性（パス＋更新時刻）。保存で内容が変われば署名がズレる。"""
+    p = Path(dict_path)
+    try:
+        return (str(p), p.stat().st_mtime) if p.exists() else (str(p), None)
+    except OSError:
+        return (str(p), None)
 
 
 def _readable_text_block(
@@ -250,21 +260,23 @@ def _render_extracted_text(chunks: list[str]) -> None:
         )
 
 
-def render_ner(
-    chunks: list[str],
-    source_label: str,
-    *,
-    model_name: str,
-    flatten_tables: bool,
-    view_height: int,
-    font_size: float,
-) -> None:
-    """固有表現抽出（NER）モードの表示。"""
+def analyze_ner(chunks: list[str], model_name: str, flatten_tables: bool):
+    """NER 解析（重い）。ボタン押下時のみ呼ぶ。"""
+    engine = get_engine(model_name)
+    with st.spinner(f"固有表現を抽出中 ...（{len(chunks)} チャンク）"):
+        return engine.extract_chunks(chunks, flatten_tables=flatten_tables)
+
+
+def render_ner_result(stored: dict, *, view_height: int, font_size: float) -> None:
+    """固有表現抽出（NER）の結果表示（保存済み結果から。再解析しない）。"""
+    model_name = stored["model_name"]
+    flatten_tables = stored["flatten"]
+    source_label = stored["source_label"]
+    result = stored["result"]
+    chunks = stored["chunks"]
+
     engine = get_engine(model_name)
     colors = build_color_map(engine.available_labels())
-
-    with st.spinner(f"固有表現を抽出中 ...（{len(chunks)} チャンク）"):
-        result = engine.extract_chunks(chunks, flatten_tables=flatten_tables)
 
     if source_label:
         st.subheader(f"解析結果: {source_label}")
@@ -434,7 +446,12 @@ def render_dict_editor(dict_path: str) -> None:
     """
     st.caption(
         "カテゴリ / 代表表記 / 別名（カンマ区切り）/ 置換（任意。空なら `[社1]` 等を自動採番）。"
-        "行の追加・削除も可。**保存先はローカルの辞書ファイル**（機密・git 管理外）。"
+        "**保存先はローカルの辞書ファイル**（機密・git 管理外）。"
+    )
+    st.caption(
+        "📝 **追加**＝一番下の空行に入力。"
+        "🗑 **削除**＝左端のチェックを ON → キーボードの **Delete / Backspace** キー"
+        "（または表右上のゴミ箱）。いずれも **[💾 辞書を保存] を押すまでファイルには反映されません**。"
     )
     path = Path(dict_path)
     entries = load_entries(path) if path.exists() else []
@@ -482,18 +499,24 @@ def render_dict_editor(dict_path: str) -> None:
         st.success(f"保存しました: {path}（{len(kept)} 件）")
 
 
-def render_masking(
-    chunks: list[str],
-    source_label: str,
-    *,
-    models: list[str],
-    flatten_tables: bool,
-    dict_path: str,
-) -> None:
-    """マスキングモードの表示。候補をチェックで選び（確定/強は初期 ON）、選んだ分をマスクする。"""
+def analyze_masking(
+    chunks: list[str], models: list[str], flatten_tables: bool, dict_path: str
+):
+    """マスキング検出（重い）。ボタン押下時のみ呼ぶ。"""
     engine = get_masking_engine(tuple(models), dict_path)
     with st.spinner(f"検出中 ...（{len(chunks)} チャンク）"):
-        analysis = engine.analyze(chunks, flatten_tables=flatten_tables)
+        return engine.analyze(chunks, flatten_tables=flatten_tables)
+
+
+def render_masking_result(stored: dict) -> None:
+    """マスキングの結果表示（保存済み結果から。候補選択・表示切替は再解析しない）。"""
+    models = stored["models"]
+    dict_path = stored["dict_path"]
+    source_label = stored["source_label"]
+    analysis = stored["analysis"]
+    chunks = stored["chunks"]
+
+    engine = get_masking_engine(tuple(models), dict_path)
 
     if source_label:
         st.subheader(f"結果: {source_label}")
@@ -638,40 +661,125 @@ def main() -> None:
             "GiNZA で固有表現を抽出して色付きで表示します。"
         )
 
-    # --- 入力（両モード共通） ---
+    # --- 入力（両モード共通。ここでは描画だけ。解析はボタン押下時のみ） ---
     input_mode = st.radio(
         "入力方法",
         ["✏️ テキストを入力", "📄 ファイルをアップロード", "📚 kb-mcp から選択"],
         horizontal=True,
     )
-    chunks, source_label = get_input_chunks(input_mode)
-    if not chunks:
-        return
+    input_id, input_kind, source_label, get_chunks = render_input(input_mode)
 
-    # ファイル/kb-mcp はテキスト化を経るので、抽出された平文を確認できるようにする。
-    if not input_mode.startswith("✏️"):
-        _render_extracted_text(chunks)
+    # 結果は (モード × 入力方法) ごとに別スロットへ保存する。これで入力方法を切り替えると
+    # その方法の最後の結果（無ければ案内）が出て、別タブから戻れば元の結果が復元される
+    # （テキストで解析→ファイルへ切替えてもテキストの結果が残り続ける、を防ぐ）。
+    mode_key = "masking" if masking_mode else "ner"
+    slot = f"{mode_key}:{input_kind}"
 
+    # 再解析が必要かは「設定署名」と「入力署名」の 2 本で見る。
+    #  - 設定署名（モデル/平文化/辞書 mtime）は**入力が無くても**算出できる。辞書を保存して
+    #    別タブから戻ると file_uploader はファイルを失う（Streamlit が非描画ウィジェットの
+    #    状態を捨てる）ので入力署名は不明になるが、設定署名は比較でき辞書変更を検知できる。
+    #  - 入力署名（input_id）は入力が確定しているときだけ比較する。
     if masking_mode:
-        if not models:
-            st.warning("モデルを 1 つ以上選択してください。")
-            return
-        render_masking(
-            chunks,
-            source_label,
-            models=models,
-            flatten_tables=flatten_tables,
-            dict_path=dict_path,
+        settings_sig: tuple = (
+            "masking",
+            tuple(models),
+            flatten_tables,
+            _dict_signature(dict_path),
         )
     else:
-        render_ner(
-            chunks,
-            source_label,
-            model_name=model_name,
-            flatten_tables=flatten_tables,
-            view_height=view_height,
-            font_size=font_size,
-        )
+        settings_sig = ("ner", model_name, flatten_tables)
+
+    # --- 解析ボタン（テキスト/ファイル/kb-mcp 共通。押したときだけ重い解析が走る） ---
+    if masking_mode and not models:
+        st.warning("モデルを 1 つ以上選択してください。")
+    stored = st.session_state.get(slot)
+
+    # 再解析はテキスト化済みチャンク（stored["chunks"]）を使い回せる＝辞書だけ変えたとき等は
+    # ファイルを上げ直す必要がない。別タブ往復で file_uploader が中身を失っても、stored が
+    # あれば押せる（その設定で再解析）。新しい入力があればそちらを優先する。
+    models_ok = not (masking_mode and not models)
+    can_fresh = get_chunks is not None and models_ok
+    can_analyze = can_fresh or (stored is not None and models_ok)
+    clicked = st.button("🔍 解析する", type="primary", disabled=not can_analyze)
+
+    # ボタン下の出力（案内 / スピナー / 結果）は 1 つの placeholder に集約する。
+    # クリック時にここを描き替えてから解析に入るので、モデルロード等で処理が止まっても
+    # 前フレームの「…を押してください」が裏に残って透ける現象が起きない（同一スロットを差し替え）。
+    output = st.empty()
+
+    if clicked:
+        with (
+            output.container()
+        ):  # 旧フレームの内容を即座に置換（スピナーをこの位置に出す）
+            if can_fresh:
+                src_label, in_kind, in_sig = source_label, input_kind, input_id
+                try:
+                    chunks = get_chunks()  # type: ignore[misc]  # can_fresh で None 除外済み
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"入力の取得に失敗しました: {e}")
+                    chunks = None
+            else:
+                # 入力ウィジェットが空（往復でクリア等）。テキスト化済みチャンクを再解析する。
+                src_label = stored["source_label"]  # type: ignore[index]
+                in_kind = stored["input_kind"]  # type: ignore[index]
+                in_sig = stored["input_sig"]  # type: ignore[index]
+                chunks = stored["chunks"]  # type: ignore[index]
+            if chunks:
+                base = {
+                    "settings_sig": settings_sig,
+                    "input_sig": in_sig,
+                    "chunks": chunks,
+                    "source_label": src_label,
+                    "input_kind": in_kind,
+                    "flatten": flatten_tables,
+                }
+                if masking_mode:
+                    analysis = analyze_masking(
+                        chunks, models, flatten_tables, dict_path
+                    )
+                    st.session_state[slot] = {
+                        **base,
+                        "kind": "masking",
+                        "analysis": analysis,
+                        "models": models,
+                        "dict_path": dict_path,
+                    }
+                else:
+                    result = analyze_ner(chunks, model_name, flatten_tables)
+                    st.session_state[slot] = {
+                        **base,
+                        "kind": "ner",
+                        "result": result,
+                        "model_name": model_name,
+                    }
+
+    stored = st.session_state.get(slot)  # クリックで更新された可能性があるので取り直す
+    if not stored:
+        output.info("入力を指定して [🔍 解析する] を押してください。")
+        return
+
+    # 解析結果は placeholder の中に描く（クリック時はスピナー表示を結果で置き換える）。
+    with output.container():
+        # 保存時から設定（辞書/モデル/平文化）か入力が変わっていれば、古い結果を残したまま
+        # 再解析を促す。設定は入力が無くても比較できる（辞書保存→別タブ往復で検知できる）。
+        # 入力が消えていても stored のチャンクで再解析できるので、ボタンは押せる前提でよい。
+        settings_changed = stored.get("settings_sig") != settings_sig
+        input_changed = input_id is not None and input_id != stored.get("input_sig")
+        if settings_changed or input_changed:
+            st.warning(
+                "⚠ 入力／設定が変更されています。"
+                "最新の結果にするには [🔍 解析する] を押してください。"
+            )
+
+        # ファイル/kb-mcp はテキスト化を経るので、解析した平文を確認できるようにする。
+        if stored["input_kind"] != "text":
+            _render_extracted_text(stored["chunks"])
+
+        if masking_mode:
+            render_masking_result(stored)
+        else:
+            render_ner_result(stored, view_height=view_height, font_size=font_size)
 
 
 if __name__ == "__main__":
