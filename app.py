@@ -211,6 +211,33 @@ def render_input(
 
         return ("kb", url, doc_id), "kb", label, get_kb_chunks
 
+    if input_mode.startswith("🗂"):
+        docs = _ner_cache().list_documents()
+        if not docs:
+            st.info(
+                "キャッシュがありません。テキスト/ファイル/kb-mcp を解析すると登録され、"
+                "ここから入力元に選べるようになります。"
+            )
+            return None, "cache", "", None
+        idx = st.selectbox(
+            "キャッシュ済み文書を選択",
+            options=range(len(docs)),
+            format_func=lambda i: (
+                f"{docs[i].source_name}（{docs[i].chunk_count}チャンク・"
+                f"{docs[i].created_at}）"
+            ),
+        )
+        d = docs[idx]
+        st.caption(
+            "保存チャンクで再解析します。NER はキャッシュにヒットして高速"
+            "（辞書・除外リストの変更は反映されます）。"
+        )
+
+        def get_cache_chunks(h=d.content_hash) -> list[str]:
+            return _ner_cache().get_chunks(h) or []
+
+        return ("cache", d.content_hash), "cache", d.source_name, get_cache_chunks
+
     # テキスト入力（単一チャンクとして扱う。長文でもエンジン側で安全分割される）
     input_text = st.text_area("解析するテキスト", value=SAMPLE_TEXT, height=200)
     if input_text.strip():
@@ -976,7 +1003,12 @@ def main() -> None:
     # --- 入力（両モード共通。ここでは描画だけ。解析はボタン押下時のみ） ---
     input_mode = st.radio(
         "入力方法",
-        ["✏️ テキストを入力", "📄 ファイルをアップロード", "📚 kb-mcp から選択"],
+        [
+            "✏️ テキストを入力",
+            "📄 ファイルをアップロード",
+            "📚 kb-mcp から選択",
+            "🗂 キャッシュから選択",
+        ],
         horizontal=True,
     )
     input_id, input_kind, source_label, get_chunks = render_input(input_mode)
@@ -1055,13 +1087,13 @@ def main() -> None:
                         "dict_path": dict_path,
                         "allowlist_path": allowlist_path,
                     }
-                    # キャッシュ一覧用に文書メタを記録（NER 層は engine 側で自動保存済み）。
+                    # 文書メタ＋チャンクを記録（NER 層は engine 側で自動保存済み）。
+                    # チャンクも保存＝「🗂 キャッシュから選択」で入力元に再利用できる。
                     _ner_cache().record_document(
                         content_hash(chunks),
                         in_kind,
                         src_label or "(無題)",
-                        sum(len(c) for c in chunks),
-                        len(chunks),
+                        chunks,
                     )
                 else:
                     result, elapsed = analyze_ner(chunks, model_name, flatten_tables)

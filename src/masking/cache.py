@@ -90,8 +90,13 @@ class NerCache:
             c.execute(
                 "CREATE TABLE IF NOT EXISTS documents ("
                 "content_hash TEXT PRIMARY KEY, source_kind TEXT, source_name TEXT, "
-                "char_count INTEGER, chunk_count INTEGER, created_at TEXT)"
+                "char_count INTEGER, chunk_count INTEGER, created_at TEXT, "
+                "chunks_json TEXT)"
             )
+            # 既存 DB（chunks_json 無し）への移行＝あとから列を足す。
+            cols = [r[1] for r in c.execute("PRAGMA table_info(documents)").fetchall()]
+            if "chunks_json" not in cols:
+                c.execute("ALTER TABLE documents ADD COLUMN chunks_json TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path)
@@ -101,22 +106,37 @@ class NerCache:
         content_hash: str,
         source_kind: str,
         source_name: str,
-        char_count: int,
-        chunk_count: int,
+        chunks: list[str],
     ) -> None:
-        """文書メタを記録（一覧表示用）。同じ content_hash は上書き。"""
+        """文書メタ＋チャンク本文を記録。同じ content_hash は上書き。
+
+        チャンク本文も保存するのは「キャッシュを入力元に選ぶ」ため（保存チャンクで再解析すると
+        content_hash が一致し NER キャッシュにヒット＝一瞬）。
+        """
         with self._conn() as c:
             c.execute(
-                "INSERT OR REPLACE INTO documents VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO documents "
+                "(content_hash, source_kind, source_name, char_count, chunk_count, "
+                "created_at, chunks_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     content_hash,
                     source_kind,
                     source_name,
-                    char_count,
-                    chunk_count,
+                    sum(len(c2) for c2 in chunks),
+                    len(chunks),
                     datetime.now().isoformat(timespec="seconds"),
+                    json.dumps(list(chunks), ensure_ascii=False),
                 ),
             )
+
+    def get_chunks(self, content_hash: str) -> list[str] | None:
+        """記録済みのチャンク本文を返す（キャッシュを入力元に使う）。無ければ None。"""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT chunks_json FROM documents WHERE content_hash = ?",
+                (content_hash,),
+            ).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
 
     def list_documents(self) -> list[DocInfo]:
         """キャッシュ済み文書の一覧（新しい順）。各文書の NER キャッシュ済みモデルも付ける。"""
