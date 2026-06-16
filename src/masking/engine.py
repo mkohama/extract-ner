@@ -30,9 +30,11 @@ import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from time import perf_counter
 
 from src.masking.dictionary import MAX_MATCH_TOKENS, MaskDictionary, normalize
 from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
+from src.ner.engine import Analysis, ProgressCallback
 
 # クラスタ代表カテゴリの選択優先度（地名・その他は低い）
 _CAT_PRIORITY = ["人名", "社名", "商標", "連絡先", "地名", "その他"]
@@ -189,6 +191,8 @@ class MaskAnalysis:
     candidates: tuple[Candidate, ...]
     original_text: str = ""
     offset_map: tuple[int, ...] = ()
+    # モデル別の解析時間 (model_name, 秒)。所要時間の可視化用（UI/CLI が表示）。
+    timings: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -279,6 +283,7 @@ class MaskingEngine:
         flatten_tables: bool = False,
         promote: bool = True,
         extra_terms: Iterable[tuple[str, str]] = (),
+        progress: ProgressCallback | None = None,
     ) -> MaskAnalysis:
         """全候補（確信度・各票の判定つき）を作る。マスクはまだ適用しない。
 
@@ -288,12 +293,25 @@ class MaskingEngine:
         境界で分割」が辞書機構の自然な帰結になる（per_entity→per_occurrence の一本化）。
         ``promote=False`` で昇格を切る（出現ごとモードの同形異義語制御用）。
         ``extra_terms`` は ``(surface, category)`` の列（UI/CLI の選択語）。
+        ``progress`` はステージコールバック：各段階の開始時に (段階index, 全段階数, ラベル) を受ける。
+        段階＝各モデルの解析（重い・モデルごと）＋ 候補の集約。1 モデルの解析中はサブ進捗を出さない
+        （最速の既定バッチで処理するため。小バッチ化は本末転倒）。「どの段階か」を示すのが目的。
         """
         chunks = list(chunks)
-        per_model = [
-            (e.model_name, e.analyze_chunks(chunks, flatten_tables=flatten_tables))
-            for e in self.engines
-        ]
+        n_models = len(self.engines)
+        n_stages = n_models + 1  # 各モデル ＋ 候補集約
+
+        per_model: list[tuple[str, Analysis]] = []
+        timings: list[tuple[str, float]] = []
+        for idx, e in enumerate(self.engines):
+            if progress is not None:  # 重い解析の前にこの段階を表示（実行中に見える）
+                progress(idx, n_stages, f"{e.model_name} で解析中")
+            t0 = perf_counter()
+            a = e.analyze_chunks(chunks, flatten_tables=flatten_tables)
+            timings.append((e.model_name, perf_counter() - t0))
+            per_model.append((e.model_name, a))
+        if progress is not None:
+            progress(n_models, n_stages, "候補を集約・確信度づけ中")
         base = per_model[0][1]
         text = base.text
         tokens = base.tokens
@@ -363,6 +381,7 @@ class MaskingEngine:
             candidates=tuple(clusters),
             original_text=base.original_text or text,
             offset_map=base.offset_map or tuple(range(len(text))),
+            timings=tuple(timings),
         )
 
     def apply(

@@ -17,13 +17,20 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import cached_property
 
 import spacy
 
 from src.ner.preprocess import prepare_for_ner_with_map
+
+# 進捗（ステージ）コールバック型：progress(stage_index, stage_total, label)。各ステージ開始時に
+# 1 回呼ぶ。UI 非依存（UI 側でステージ表示に使う）。
+# 注: 1 モデルの nlp.pipe は最速の既定バッチ（全チャンクを 1 バッチ）で処理するため、その処理中の
+# サブ進捗は出さない（小バッチにすると transformer が遅くなる＝本末転倒。electra 実測で +8〜29%）。
+# 代わりに「どのモデル/段階を実行中か（何段/全何段）」を示す。
+ProgressCallback = Callable[[int, int, str], None]
 
 # ja_ginza_electra（torch/thinc/huggingface）系が出す deprecation 警告を抑制する。
 # 推論のたびに大量に出る `torch.cuda.amp.autocast(...)` ほか、初回ロード時の

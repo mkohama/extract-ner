@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import re
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -260,11 +261,39 @@ def _render_extracted_text(chunks: list[str]) -> None:
         )
 
 
+def _stage_callback(status, n_chunks: int):
+    """ステージ表示用コールバック。重い処理の前に「何段/全何段・何を実行中か」を出す。
+
+    1 モデルの解析中はサブ進捗を出さない（最速の既定バッチで処理＝途中経過は取れない）。
+    代わりにどの段階かを示す。Streamlit はブロッキング中も直前に積んだ表示を反映するので、
+    各段階の開始時に更新すれば「実行中の段階」が見える。
+    """
+
+    def cb(idx: int, total: int, label: str) -> None:
+        status.info(
+            f"⏳ ステージ {idx + 1}/{total}: {label} ...（{n_chunks} チャンク）"
+        )
+
+    return cb
+
+
+def _timing_caption(timings, total_seconds: float, n_chunks: int) -> str:
+    """解析時間の説明文（合計・モデル別・チャンク当たり）を作る。"""
+    per = total_seconds / n_chunks if n_chunks else 0.0
+    if timings:  # モデル別の内訳（マスキングは 2 モデル）
+        parts = " / ".join(f"{m}: {s:.1f}s" for m, s in timings)
+        return f"⏱ 解析 合計 {total_seconds:.1f}s（{parts}）・ {per:.2f}s/チャンク（{n_chunks} 件）"
+    return f"⏱ 解析 {total_seconds:.1f}s ・ {per:.2f}s/チャンク（{n_chunks} 件）"
+
+
 def analyze_ner(chunks: list[str], model_name: str, flatten_tables: bool):
-    """NER 解析（重い）。ボタン押下時のみ呼ぶ。"""
+    """NER 解析（重い）。ボタン押下時のみ呼ぶ。戻り値は (結果, 所要秒)。"""
     engine = get_engine(model_name)
-    with st.spinner(f"固有表現を抽出中 ...（{len(chunks)} チャンク）"):
-        return engine.extract_chunks(chunks, flatten_tables=flatten_tables)
+    start = time.perf_counter()
+    with st.spinner(f"⏳ {model_name} で解析中 ...（{len(chunks)} チャンク）"):
+        result = engine.extract_chunks(chunks, flatten_tables=flatten_tables)
+    elapsed = time.perf_counter() - start
+    return result, elapsed
 
 
 def render_ner_result(stored: dict, *, view_height: int, font_size: float) -> None:
@@ -277,6 +306,9 @@ def render_ner_result(stored: dict, *, view_height: int, font_size: float) -> No
 
     engine = get_engine(model_name)
     colors = build_color_map(engine.available_labels())
+
+    if stored.get("elapsed"):
+        st.success(_timing_caption((), stored["elapsed"], len(chunks)), icon="✅")
 
     if source_label:
         st.subheader(f"解析結果: {source_label}")
@@ -504,8 +536,14 @@ def analyze_masking(
 ):
     """マスキング検出（重い）。ボタン押下時のみ呼ぶ。"""
     engine = get_masking_engine(tuple(models), dict_path)
-    with st.spinner(f"検出中 ...（{len(chunks)} チャンク）"):
-        return engine.analyze(chunks, flatten_tables=flatten_tables)
+    status = st.empty()
+    analysis = engine.analyze(
+        chunks,
+        flatten_tables=flatten_tables,
+        progress=_stage_callback(status, len(chunks)),
+    )
+    status.empty()
+    return analysis
 
 
 def render_masking_result(stored: dict) -> None:
@@ -517,6 +555,10 @@ def render_masking_result(stored: dict) -> None:
     chunks = stored["chunks"]
 
     engine = get_masking_engine(tuple(models), dict_path)
+
+    if analysis.timings:
+        total = sum(s for _, s in analysis.timings)
+        st.success(_timing_caption(analysis.timings, total, len(chunks)), icon="✅")
 
     if source_label:
         st.subheader(f"結果: {source_label}")
@@ -746,12 +788,13 @@ def main() -> None:
                         "dict_path": dict_path,
                     }
                 else:
-                    result = analyze_ner(chunks, model_name, flatten_tables)
+                    result, elapsed = analyze_ner(chunks, model_name, flatten_tables)
                     st.session_state[slot] = {
                         **base,
                         "kind": "ner",
                         "result": result,
                         "model_name": model_name,
+                        "elapsed": elapsed,
                     }
 
     stored = st.session_state.get(slot)  # クリックで更新された可能性があるので取り直す
