@@ -1,11 +1,16 @@
 # data-redactor
 
-GiNZA (`ja_ginza`) で日本語の固有表現抽出 (NER) を実行し、spaCy の displaCy で
-色付きハイライト表示する HTML を生成するプログラムです。
+GiNZA (spaCy) ベースの**日本語ドキュメント機密マスキング**ツール。LLM へ渡す前の前処理として、
+人名・社名・商標・連絡先（メール等）などの機密情報を検出して伏せ字（`[社1]` 等）に置き換えます。
 
-`.txt` / `.md` / `.pdf` / `.docx` / `.xlsx` / `.pptx` などのファイルを指定すると、
-kb-mcp から移植したテキスト変換部 ([src/](src/) 配下の `DocumentLoader`) で
-テキスト化してから解析します。
+検出は **マスク辞書（名簿）＋ Sudachi 品詞 ＋ GiNZA NER 2モデル ＋ 正規表現（連絡先）** の合議で行い、
+確信度に応じて「自動マスク／要レビュー／非表示」に振り分けます。**recall 最優先**（マスク漏れ＝漏洩）で、
+不確実なものはレビューに回す設計です。NER 単体の可視化（displaCy）も付属します。
+
+`.txt` / `.md` / `.pdf` / `.docx` / `.xlsx` / `.pptx` などのファイル、貼り付けテキスト、kb-mcp の文書を
+入力にできます（kb-mcp から移植した `DocumentLoader` でテキスト化 → チャンク分割 → 解析）。
+
+> 設計・経緯の詳細はローカルの `docs-dev/`（git 管理外）と [CLAUDE.md](CLAUDE.md) を参照。
 
 ## セットアップ
 
@@ -13,113 +18,124 @@ kb-mcp から移植したテキスト変換部 ([src/](src/) 配下の `Document
 uv sync
 ```
 
+Python 3.11 / spaCy 3.7 系 / numpy 1.x に固定しています（ja_ginza_electra の依存と GiNZA 5.2 の制約のため。
+3.12 や spaCy 3.8・numpy 2 では動作しません）。
+
 ## Web UI (Streamlit)
 
-ドキュメントをアップロードすると、テキスト化 → NER → 色付き表示まで行う UI です。
-
 ```powershell
-uv run streamlit run app.py
+uv run data-redactor ui
 ```
 
-ブラウザで http://localhost:8501 が開きます。
+ブラウザで http://localhost:8501 が開きます。上部のモードで 4 つの画面を切り替えます。
 
-- 左サイドバーの「⚙️ 設定」: モデル切替（既定 `ja_ginza_electra`）／テーブル平文化トグル（既定 OFF）
-- 入力方法をラジオで選択:
-  - **📄 ファイルをアップロード**: 対応形式のファイルをドラッグ＆ドロップ
-  - **✏️ テキストを入力**: テキストを貼り付けて解析
-  - **📚 kb-mcp から選択**: kb-mcp サーバの文書一覧から選んで解析（要 kb-mcp 起動）
-- 「表示するラベル」マルチセレクトで、ハイライト・一覧に出すラベルを絞り込み可能（初期は全件）
-- 抽出された固有表現を displaCy のハイライト表示・ラベル別件数・一覧表で確認できます
+- **🔒 マスキング**: 入力（✏️テキスト / 📄ファイル / 📚kb-mcp）を選び **[🔍 解析する]** を押すと候補を検出。
+  確信度（確定/強は自動マスク ON、中/弱はレビュー、微弱/除外は既定で非表示）でフィルタしながら、
+  チェックでマスク対象を選びます。結果は色付き / マスク済み / 原文 で確認・ダウンロードできます。
+  表（`|` 区切り）は検出だけ平文化し、**マスクは `|` 入り原文に当てて体裁を保持**します。
+- **🔍 固有表現抽出 (NER)**: GiNZA の固有表現を displaCy で色付き表示（検出の素を見る用）。
+- **📒 マスク辞書**: 確定マスクする社名・商標・社員名の名簿（`data/mask_dict.yaml`）を編集・保存。
+- **🚫 除外リスト**: マスク**しない**語（誤検出の社内コード・変数名など）の名簿（`data/mask_allowlist.yaml`）を編集。
+  登録すると以後どの文書でも候補が「除外」へ落ちます（辞書・連絡先＝確定は上書きしません＝recall 安全）。
+
+解析には GiNZA 2 モデルを使うため時間がかかります。進捗はステージ表示、所要時間は結果上部に表示します。
 
 ### kb-mcp 連携
 
-「📚 kb-mcp から選択」を使うには、kb-mcp 側を HTTP サーバとして起動しておきます:
+「📚 kb-mcp から選択」を使うには kb-mcp を HTTP サーバとして起動しておきます:
 
 ```powershell
 # kb-mcp プロジェクト側で
 uv run kb-mcp-server --transport http --port 8000
 ```
 
-UI で URL（既定 `http://localhost:8000/mcp`）を指定し「文書リストを取得」→ 文書を選択すると、
-その本文を**チャンク単位で**取得して解析します（kb-mcp は格納時に既にチャンク分割済みなので、
-結合せずそのまま解析する。[src/sources/kb_mcp.py](src/sources/kb_mcp.py) は term-variants から移植）。
+UI で URL（既定 `http://localhost:8000/mcp`）を指定 →「文書リストを取得」→ 文書を選択 →「解析する」。
+本文は**チャンク単位**で取得します（kb-mcp は格納時に分割済みなので結合せず解析）。
 
-## CLI の使い方
+## CLI
+
+統一コマンド `data-redactor`（実体は [src/cli.py](src/cli.py)。`uv run main.py <サブコマンド>` でも可）。
 
 ```powershell
-# サンプル文を解析して ner.html を生成
-uv run main.py
+# Streamlit UI を起動
+uv run data-redactor ui
 
-# 生成した HTML を既定ブラウザで開く
-uv run main.py --open
+# マスキング（ファイル or --text）。既定で data/mask_dict.yaml を自動読込
+uv run data-redactor mask report.pdf
+uv run data-redactor mask --text "銀座のSONYの由利さんに連絡: yuri@example.co.jp"
+uv run data-redactor mask report.docx --out masked.txt        # マスク済みを書き出し
+uv run data-redactor mask report.docx --audit                 # 候補の票分布・確信度（表層なし＝共有OK）
+uv run data-redactor mask report.docx --audit-surface         # 監査に表層も付ける（機密・共有禁止）
+uv run data-redactor mask report.docx --no-flatten            # 表の平文化を切る
 
-# 任意のテキストを直接解析
-uv run main.py --text "解析したい文章"
+# NER → displaCy の HTML（ner.html）。--open で既定ブラウザ表示・--serve でサーバ表示
+uv run data-redactor ner report.pdf --open
+uv run data-redactor ner --text "銀座のSONYの由利さん" --labels Person --labels Company
 
-# 任意のファイルをテキスト化して解析 (.txt/.md/.pdf/.docx/.xlsx/.pptx/.html/.xml)
-uv run main.py --input report.pdf
-uv run main.py --input data.xlsx --open
+# 各トークンの Sudachi 品詞 / NER ラベルを並べて観察（recall の穴を見る）
+uv run data-redactor debug report.pdf --both-models --all-tokens
 
-# モデルを切り替え (既定 ja_ginza_electra / 軽量・高速の ja_ginza)
-uv run main.py --model ja_ginza --input report.pdf
-
-# 特定カテゴリ（ラベル）だけ抽出
-uv run main.py --labels Person Company --text "銀座のSONYの由利さん"
-
-# Markdown テーブルを平文化してから解析 (既定はそのまま解析)
-uv run main.py --flatten --input table.md
-
-# ブラウザで http://localhost:5000 を開いて表示 (Ctrl+C で終了)
-uv run main.py --serve
+# 品質ゲート（ruff + mypy）
+uv run data-redactor check
 ```
 
-抽出結果はコンソールにも一覧表示され、`ner.html` に displaCy のハイライト表示を出力します。
+## マスク辞書・除外リスト（ローカル専用）
 
-## アーキテクチャ（エンジンと UI の分離）
+機密のため `data/*.yaml` と `data/cache*` は **git 管理外**です。各マシンで用意します。
 
-固有表現抽出の中核（エンジン）と、表示層（CLI / UI）・入力ソースを分離しています。
-エンジンは Streamlit や displaCy に依存しないため、ライブラリとして再利用できます。
+- **マスク辞書** `data/mask_dict.yaml`: 社名・商標・社員名の名簿。一致語は**確定マスク**（全出現）。
+  別表記（英語↔カタカナ・略称）を 1 つの代表表記にまとめ、伏せ字も統一できます。
+  雛形 `data/mask_dict.sample.yaml` をコピーして実値を入れてください。
+- **除外リスト** `data/mask_allowlist.yaml`: マスクしない語。検出由来の誤検出だけを「除外」に落とし、
+  辞書・連絡先（確定）は守ります。UI の 🚫 除外リスト タブで編集できます。
+
+## 検出ロジックの要点
+
+- **候補生成**: マスク辞書 ∪ Sudachi 品詞（人名/地名/固有名詞）∪ NER 2モデル ∪ 連絡先の正規表現。
+- **確信度（カテゴリ別の独立チャネル数で合議）**:
+  - **確定** = 実辞書一致 または 連絡先の正規表現（決定的）
+  - **強** = 2 チャネル一致 など（自動マスク）
+  - **中** = 単独チャネル（要レビュー）
+  - **弱** = 地名・その他（要レビュー）
+  - **微弱** = コードらしき誤検出（`Em_NoYes` / `~C02` / `7-410` / 1文字英字 など。既定で非表示）
+  - **除外** = 除外リスト一致（既定で非表示）
+- **自動マスク対象は 確定/強**。中/弱はレビュー、微弱/除外は確信度フィルタで既定非表示。
+- マスクは原文へ当て、表記ゆれは同じ伏せ字に寄せます。
+
+## アーキテクチャ（エンジンと表示層の分離）
+
+エンジン（UI 非依存）と表示層（CLI / Streamlit）・入力アダプタを分離。エンジンはライブラリとして再利用できます。
 
 ```
 src/
-  ner/                 ← エンジン（UI 非依存）
-    engine.py            NerEngine / Entity / ExtractionResult（カテゴリ絞り込み込み）
-    preprocess.py        テーブル平文化などの前処理
-    rendering.py         displaCy 用の色マップ・HTML 生成（表示ヘルパ）
+  masking/             ← マスキングエンジン（UI 非依存）
+    engine.py            MaskingEngine（候補生成→確信度→マスク適用）
+    dictionary.py        MaskDictionary（社名・商標・人名の名簿）
+    allowlist.py         MaskAllowlist（除外リスト）
+  ner/                 ← NER エンジン（UI 非依存）
+    engine.py            NerEngine / Entity / ExtractionResult
+    preprocess.py        テーブル平文化（検出用）
+    rendering.py         displaCy の色マップ・HTML 生成
   sources/             ← 入力アダプタ（チャンクのリストを返す）
-    files.py             ファイル → チャンク（DocumentLoader + Splitter 経由）
+    files.py             ファイル → チャンク（DocumentLoader + Splitter）
     kb_mcp.py            kb-mcp からの取得（分割済みチャンクをそのまま使う）
-    __init__.py          SAMPLE_TEXT など
-  core/document/       ← テキスト変換＋チャンク分割ライブラリ（kb-mcp から移植）
+  core/document/       ← テキスト変換＋チャンク分割（kb-mcp から移植）
   config.py            ← ChunkingConfig（チャンクサイズ設定）
-main.py                ← CLI（薄い表示層）
-app.py                 ← Streamlit UI（薄い表示層）
+main.py / app.py       ← 薄い表示層（CLI シム / Streamlit UI）
 ```
 
-エンジンの使用例（テキストから抽出 / 特定カテゴリだけ抽出）:
+## チャンク分割について（長文対策）
 
-```python
-from src.ner import NerEngine
+GiNZA 内部の SudachiPy は **1 回の解析で 49,149 バイト（≒16,000 文字弱）まで**しか扱えず、
+長文を丸ごと渡すと `SudachiError: Input is too long` で落ちます。そこで解析前に
+`SemanticRAGTextSplitter`（[src/core/document/text_splitter.py](src/core/document/text_splitter.py)）で
+**ファイルタイプ別にチャンク分割**してから解析し、各チャンクの結果を文字位置補正してマージします。
+kb-mcp 経由の文書は格納時に分割済みなので結合せずそのまま使います。
 
-engine = NerEngine("ja_ginza_electra")
+## ファイルのテキスト変換
 
-# 全カテゴリ抽出
-result = engine.extract("銀座のSONYに勤める由利さん")
-for ent in result.entities:
-    print(ent.text, ent.label, ent.start, ent.end)
-
-# 特定カテゴリだけ抽出（テーブル平文化も任意で）
-companies = engine.extract(text, labels=["Company"], flatten_tables=True)
-
-# 抽出済みの結果から後段で絞り込み
-persons = result.filter(["Person"])
-```
-
-## ファイルのテキスト変換について
-
-`--input` で指定したファイルは [src/core/document/document_loader.py](src/core/document/document_loader.py)
-の `DocumentLoader` で拡張子ごとに最適なローダーへ振り分けてテキスト化します
-(kb-mcp プロジェクトのテキスト変換部をそのまま移植)。
+`DocumentLoader`（[src/core/document/document_loader.py](src/core/document/document_loader.py)）が拡張子ごとに
+最適なローダーへ振り分けます（kb-mcp から移植）。
 
 | 拡張子 | ローダー | 備考 |
 | --- | --- | --- |
@@ -130,51 +146,8 @@ persons = result.filter(["Person"])
 | `.pptx` | PowerPointLoader | スライド・表・ノートを抽出 |
 | `.html`, `.xml` | Unstructured*Loader | 別途 `uv add unstructured` が必要 |
 
-`.html` / `.xml` を使う場合のみ追加インストールが必要です:
-
-```powershell
-uv add unstructured
-```
-
-## チャンク分割について（長文対策）
-
-GiNZA 内部の SudachiPy は **1 回の解析で 49,149 バイト（≒16,000 文字弱）まで**しか扱えず、
-仕様書のような長文（数十〜数百 KB）を丸ごと渡すと `SudachiError: Input is too long` で落ちます。
-
-そこで NER の前に、kb-mcp から移植した `SemanticRAGTextSplitter`
-([src/core/document/text_splitter.py](src/core/document/text_splitter.py)) で
-**ファイルタイプ別にチャンク分割**してから解析します（xlsx は行構造を保ったまま約1000トークン単位など、
-kb-mcp の RAG 格納時と同じ単位）。各チャンクを解析した結果は、文字位置を補正して 1 つにマージします
-（`NerEngine.extract_chunks`）。kb-mcp 経由の文書は格納時に分割済みなので、結合せずそのまま使います。
-
 ## 表（テーブル）の扱い
 
-GiNZA は自然文で学習しているため、Markdown のテーブル記法（`|` 区切り）を
-そのまま渡すとセル内の語をほとんど抽出できません。そこで解析前に
-`prepare_for_ner()`（[src/ner/preprocess.py](src/ner/preprocess.py)）でテーブル記法を取り除きます。
-
-- 区切り行（`| --- | --- |`）は削除
-- データ行はセルを区切り文字（既定は読点「、」、`TABLE_CELL_DELIMITER` で変更可）で
-  連結し、末尾に句点を付与
-
-例: `| 由利 | 33 | Sony |` → `由利、33、Sony。`
-
-ヘッダー行に依存しないため、**テーブルの途中だけを含むチャンク**に適用しても
-破綻せず、`| 由利` のような記号混じりの誤抽出も生じません。
-
-ただし GiNZA の NER は文脈依存が強く、短い語や曖昧な語（例: "Sony"）は
-どの整形をしても抽出されないことがあります（表データの抽出は本質的に不安定）。
-
-## ラベルの配色
-
-GiNZA は関根の拡張固有表現階層 (PERSON / DATE / TIME / AGE / MONEY /
-POSITION_VOCATION / N_PERSON / OCCASION_OTHER など) のラベルを出力します。
-[src/ner/rendering.py](src/ner/rendering.py) の `ENT_COLORS` でラベルごとの色を調整できます。
-
-## 補足
-
-- 依存関係の都合で Python 3.11 / spaCy 3.7 系 / numpy 1.x に固定しています
-  (ja_ginza_electra が古い tokenizers を要求するため Python 3.11、
-  GiNZA 5.2 と spaCy 3.8・numpy 2 の組み合わせは動作しません)。
-- Windows のコンソール表示が文字化けする場合がありますが、UTF-8 で出力される
-  `ner.html` は正しく表示されます。
+GiNZA は自然文で学習しているため、Markdown のテーブル記法（`|` 区切り）をそのまま渡すとセル内の語を
+取りこぼします。検出時のみ `|` を句読点に直して平文化し（[src/ner/preprocess.py](src/ner/preprocess.py)）、
+**マスクは `|` 入り原文に当てて体裁を保持**します（平文化は検出専用の内部処理）。
