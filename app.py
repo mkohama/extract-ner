@@ -424,6 +424,7 @@ def _render_by_entity(engine, analysis, confidences):
         [
             {
                 "マスク": g.confidence in AUTO_MASK_CONFIDENCE,
+                "除外": g.confidence == "除外",
                 "確信度": _confidence_label(g.confidence),
                 "カテゴリ": g.category,
                 "表層": g.surface,
@@ -440,14 +441,27 @@ def _render_by_entity(engine, analysis, confidences):
         table,
         hide_index=True,
         width="stretch",
-        disabled=[c for c in table.columns if c != "マスク"],
-        column_config={"マスク": st.column_config.CheckboxColumn("マスク")},
+        disabled=[c for c in table.columns if c not in ("マスク", "除外")],
+        column_config={
+            "マスク": st.column_config.CheckboxColumn("マスク"),
+            "除外": st.column_config.CheckboxColumn(
+                "除外",
+                help="チェックして下のボタンで除外リストへ。以後どの文書でも候補外に。",
+            ),
+        },
         key="mask_entity",
     )
+    masks = edited["マスク"].tolist()
+    excludes = edited["除外"].tolist()
+    # 除外チェックした行はマスクしない（除外が優先）。
     selected = [
-        m for g, on in zip(groups, edited["マスク"].tolist()) if on for m in g.members
+        m
+        for g, on, ex in zip(groups, masks, excludes)
+        if on and not ex
+        for m in g.members
     ]
-    return engine.apply(analysis, selected, expand=True)
+    to_exclude = [g.surface for g, ex in zip(groups, excludes) if ex]
+    return engine.apply(analysis, selected, expand=True), to_exclude
 
 
 def _render_by_occurrence(engine, analysis, confidences):
@@ -469,6 +483,7 @@ def _render_by_occurrence(engine, analysis, confidences):
         [
             {
                 "マスク": c.confidence in AUTO_MASK_CONFIDENCE,
+                "除外": c.confidence == "除外",
                 "確信度": _confidence_label(c.confidence),
                 "カテゴリ": c.category,
                 "表層": c.surface,
@@ -485,12 +500,21 @@ def _render_by_occurrence(engine, analysis, confidences):
         table,
         hide_index=True,
         width="stretch",
-        disabled=[c for c in table.columns if c != "マスク"],
-        column_config={"マスク": st.column_config.CheckboxColumn("マスク")},
+        disabled=[c for c in table.columns if c not in ("マスク", "除外")],
+        column_config={
+            "マスク": st.column_config.CheckboxColumn("マスク"),
+            "除外": st.column_config.CheckboxColumn(
+                "除外",
+                help="チェックして下のボタンで除外リストへ。以後どの文書でも候補外に。",
+            ),
+        },
         key="mask_occurrence",
     )
-    selected = [c for c, on in zip(cands, edited["マスク"].tolist()) if on]
-    return engine.apply(analysis, selected, expand=False)
+    masks = edited["マスク"].tolist()
+    excludes = edited["除外"].tolist()
+    selected = [c for c, on, ex in zip(cands, masks, excludes) if on and not ex]
+    to_exclude = [c.surface for c, ex in zip(cands, excludes) if ex]
+    return engine.apply(analysis, selected, expand=False), to_exclude
 
 
 def render_dict_editor(dict_path: str) -> None:
@@ -611,6 +635,7 @@ def render_masking_result(stored: dict) -> None:
     """マスキングの結果表示（保存済み結果から。候補選択・表示切替は再解析しない）。"""
     models = stored["models"]
     dict_path = stored["dict_path"]
+    allowlist_path = stored.get("allowlist_path", str(_DEFAULT_ALLOWLIST))
     source_label = stored["source_label"]
     analysis = stored["analysis"]
     chunks = stored["chunks"]
@@ -647,9 +672,26 @@ def render_masking_result(stored: dict) -> None:
     by_entity = unit.startswith("実体")
 
     if by_entity:
-        result = _render_by_entity(engine, analysis, confidences)
+        result, to_exclude = _render_by_entity(engine, analysis, confidences)
     else:
-        result = _render_by_occurrence(engine, analysis, confidences)
+        result, to_exclude = _render_by_occurrence(engine, analysis, confidences)
+
+    # 「除外」チェックした語を除外リストへ追記（1 文書で登録→他文書でも候補外に）。
+    if to_exclude:
+        if st.button(
+            f"🚫 選択した {len(to_exclude)} 件を除外リストへ追加",
+            key="add_to_allowlist",
+            help="チェックした語を除外リスト(YAML)に追記。再解析すると「除外」に落ちます。",
+        ):
+            path = Path(allowlist_path)
+            current = load_allowlist_entries(path) if path.exists() else []
+            merged = current + [s for s in to_exclude if s not in current]
+            save_allowlist_entries(path, merged)
+            added = len(merged) - len(current)
+            st.success(
+                f"除外リストに {added} 件追加しました（計 {len(merged)} 件）: {path}。"
+                "**[🔍 解析する]** で再解析すると反映されます。"
+            )
 
     # --- 結果（色付き表示 / マスク済み / 元テキスト） ---
     col_main, col_side = st.columns([3, 1])
@@ -882,6 +924,7 @@ def main() -> None:
                         "analysis": analysis,
                         "models": models,
                         "dict_path": dict_path,
+                        "allowlist_path": allowlist_path,
                     }
                 else:
                     result, elapsed = analyze_ner(chunks, model_name, flatten_tables)
