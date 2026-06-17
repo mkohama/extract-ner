@@ -361,10 +361,9 @@ def _prepare_pieces(
     pieces: list[_Piece] = []
     for chunk in chunks:
         for orig in _byte_safe_pieces(chunk):
-            if flatten_tables:
-                flat, cmap = prepare_for_ner_with_map(orig)
-            else:
-                flat, cmap = orig, list(range(len(orig)))
+            # 括弧グルー対策の空白挿入は flatten の有無によらず常に適用する
+            # （`姓A(社B)` の埋没＝辞書語の漏れを防ぐ）。flatten 時はテーブル平文化も。
+            flat, cmap = prepare_for_ner_with_map(orig, flatten_tables=flatten_tables)
             if flat.strip():
                 pieces.append(_Piece(flat, orig, tuple(cmap)))
     return pieces

@@ -114,11 +114,68 @@ def flatten_markdown_tables(text: str, delimiter: str = TABLE_CELL_DELIMITER) ->
     return flatten_markdown_tables_with_map(text, delimiter)[0]
 
 
-def prepare_for_ner(text: str) -> str:
-    """NER 解析前のテキスト整形（現状は Markdown テーブルの平文化のみ）。"""
-    return flatten_markdown_tables(text)
+# 括弧グルー対策で前後に空白を挟む括弧（半角・全角の丸/角/波括弧）。
+# GiNZA/SudachiPy は `語(中身)` を空白なしだと 1 トークンに融合し（例 `姓A(社B)`→
+# 「名詞-固有名詞-人名-姓」1 個、`製品(社B)`→「名詞-普通名詞-一般」1 個）、トークン単位照合の
+# マスク辞書が中の語（社B）を拾えず漏れる。括弧に隣接する非空白の境界へ空白を 1 つ挟むと
+# 正しく割れる（実測：`姓A (社B)` は 姓A/(/社B/) に分割され 社B=確定）。
+# 引用の鉤括弧「」『』〈〉《》は対象外（既に分割され、対話/書名の体裁を崩さないため）。
+_BRACKET_OPEN = "([{（［｛〔【"
+_BRACKET_CLOSE = ")]}）］｝〕】"
 
 
-def prepare_for_ner_with_map(text: str) -> tuple[str, list[int]]:
-    """:func:`prepare_for_ner` の対応表つき版（平坦化後テキストと原文位置対応表）。"""
-    return flatten_markdown_tables_with_map(text)
+def pad_brackets_with_map(text: str) -> tuple[str, list[int]]:
+    """括弧の融合を防ぐため、括弧に隣接する非空白境界へ空白を挿入する。
+
+    開き括弧の直前（直前が非空白のとき）と閉じ括弧の直後（直後が非空白のとき）に半角空白を
+    1 つ挟む。トークナイザが括弧で割れるようになり、辞書語（例 `姓A(社B)` の `社B`）が
+    独立トークンになって確定マスクされる。返り値 ``(padded, cmap)``：``cmap[i]`` は ``padded``
+    の i 文字目に対応する ``text`` の文字位置（挿入した空白は ``-1``＝原文対応なし）。
+    """
+    out: list[str] = []
+    cmap: list[int] = []
+    n = len(text)
+    for i, ch in enumerate(text):
+        prev = text[i - 1] if i > 0 else ""
+        if ch in _BRACKET_OPEN and prev and not prev.isspace():
+            out.append(" ")
+            cmap.append(-1)
+        out.append(ch)
+        cmap.append(i)
+        nxt = text[i + 1] if i + 1 < n else ""
+        if ch in _BRACKET_CLOSE and nxt and not nxt.isspace():
+            out.append(" ")
+            cmap.append(-1)
+    return "".join(out), cmap
+
+
+def _compose_maps(outer: list[int], inner: list[int]) -> list[int]:
+    """2 段の位置対応表を合成する。
+
+    ``inner[i]`` は最終テキストの i 文字目 → 中間テキストの位置（挿入は -1）。
+    ``outer[j]`` は中間テキストの j 文字目 → 原文の位置（挿入は -1）。
+    返り値 ``out[i]`` は最終テキストの i 文字目 → 原文の位置（どちらかが -1 なら -1）。
+    """
+    return [outer[j] if j != -1 else -1 for j in inner]
+
+
+def prepare_for_ner(text: str, *, flatten_tables: bool = True) -> str:
+    """NER 解析前のテキスト整形（任意でテーブル平文化 → **常に**括弧の前後に空白挿入）。"""
+    return prepare_for_ner_with_map(text, flatten_tables=flatten_tables)[0]
+
+
+def prepare_for_ner_with_map(
+    text: str, *, flatten_tables: bool = True
+) -> tuple[str, list[int]]:
+    """:func:`prepare_for_ner` の対応表つき版（整形後テキストと原文位置対応表）。
+
+    ``flatten_tables`` のときだけ ① Markdown テーブル平文化を行い、その後 **常に**
+    ② 括弧グルー対策の空白挿入を行う。①②の対応表を合成して返す（括弧対策は表の有無に
+    かかわらず効かせる＝`姓A(社B)` の埋没を常に防ぐ）。
+    """
+    if flatten_tables:
+        flat1, cmap1 = flatten_markdown_tables_with_map(text)
+    else:
+        flat1, cmap1 = text, list(range(len(text)))
+    flat2, cmap2 = pad_brackets_with_map(flat1)
+    return flat2, _compose_maps(cmap1, cmap2)
