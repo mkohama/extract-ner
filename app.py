@@ -138,42 +138,6 @@ def _kb_doc_label(meta: dict) -> str:
     return f"{name}　({path})" if path else str(name)
 
 
-def _searchable_pick(
-    rows: list[dict],
-    match_text: Callable[[int], str],
-    *,
-    key: str,
-    search_label: str = "🔎 絞り込み（部分一致）",
-    column_config: dict | None = None,
-) -> int | None:
-    """検索ボックス＋表（1 行選択）で 1 件選ばせ、選択行の元インデックスを返す。
-
-    件数が増えても探しやすいよう、``st.selectbox`` の代わりに使う共通 UI。
-    ``rows`` は表示用の dict 列（キー順がそのまま表の列）。``match_text(i)`` は
-    行 i の検索対象テキスト（入力語の部分一致で絞り込む）。戻り値は ``rows`` 内の
-    **元インデックス**（未選択／該当なしなら ``None``）。
-    """
-    q = st.text_input(search_label, key=f"{key}_q").strip().lower()
-    visible = [i for i in range(len(rows)) if not q or q in match_text(i).lower()]
-    st.caption(f"{len(visible)} / {len(rows)} 件")
-    if not visible:
-        return None
-    df = pd.DataFrame([rows[i] for i in visible])
-    event = st.dataframe(
-        df,
-        hide_index=True,
-        width="stretch",
-        on_select="rerun",
-        selection_mode="single-row",
-        column_config=column_config,
-        key=key,
-    )
-    selected = event.selection.rows
-    if not selected:
-        return None
-    return visible[selected[0]]
-
-
 def render_input(
     input_mode: str,
 ) -> tuple[tuple | None, str, str, Callable[[], list[str]] | None]:
@@ -229,35 +193,25 @@ def render_input(
             st.warning("kb-mcp に登録された文書がありません。")
             return None, "kb", "", None
 
-        # 同じソース名で解析済み（＝NER キャッシュ済み）の kb 文書 → 「キャッシュ済み」バッジに使う。
+        # 同じソース名で解析済み（＝NER キャッシュ済み）の kb 文書 → 「✓」を頭に付ける目安に使う。
         # 照合は表示ラベル（record_document に source_name として保存される値）で行う。
         cached_kb = {
             d.source_name
             for d in _ner_cache().list_documents()
             if d.source_kind == "kb"
         }
-        rows = [
-            {
-                "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
-                "名前": (m.get("title") or m.get("file_name") or m.get("id") or "?"),
-                "パス": m.get("file_path") or "",
-            }
-            for m in docs
-        ]
-        idx = _searchable_pick(
-            rows,
-            lambda i: f'{rows[i]["名前"]} {rows[i]["パス"]}',
+
+        def _kb_label(i: int) -> str:
+            badge = "✓ " if _kb_doc_label(docs[i]) in cached_kb else ""
+            return badge + _kb_doc_label(docs[i])
+
+        # selectbox は型入力で絞り込み可。「✓」＝キャッシュ済み（名前一致の目安）。
+        idx = st.selectbox(
+            "文書を選択（頭の ✓ ＝キャッシュ済みの目安。入力して絞り込み可）",
+            options=range(len(docs)),
+            format_func=_kb_label,
             key="kb_pick",
-            search_label="🔎 文書を絞り込み（名前・パス）",
-            column_config={
-                "📦": st.column_config.TextColumn(
-                    "📦", help="キャッシュ済み（名前一致の目安）", width="small"
-                ),
-            },
         )
-        if idx is None:
-            st.caption("表の行をクリックして文書を選択してください。")
-            return None, "kb", "", None
         meta = docs[idx]
         doc_id = meta.get("id") or meta.get("document_id")
         if not doc_id:
@@ -279,26 +233,24 @@ def render_input(
                 "ここから入力元に選べるようになります。"
             )
             return None, "cache", "", None
-        rows = [
-            {
-                "ソース": d.source_name,
-                "種別": d.source_kind,
-                "チャンク": d.chunk_count,
-                "文字数": d.char_count,
-                "解析日時": d.created_at,
-            }
-            for d in docs
-        ]
-        idx = _searchable_pick(
-            rows,
-            lambda i: rows[i]["ソース"],
+        # content_hash を値にする＝解析で並び替わっても選択が保たれる（位置ベースだと
+        # 解析→created_at 更新→先頭移動でズレ、別文書を解析してしまう）。selectbox は
+        # 常に有効な選択を返すので「選択喪失→stored へフォールバック」も起きない。
+        by_hash = {d.content_hash: d for d in docs}
+
+        def _cache_label(h: str) -> str:
+            d = by_hash[h]
+            return (
+                f"{d.source_name}（{d.source_kind}・{d.chunk_count}チャンク・{d.created_at}）"
+            )
+
+        sel_hash = st.selectbox(
+            "キャッシュ済み文書を選択（入力して絞り込み可）",
+            options=list(by_hash.keys()),
+            format_func=_cache_label,
             key="cache_pick",
-            search_label="🔎 キャッシュを絞り込み（ソース名）",
         )
-        if idx is None:
-            st.caption("表の行をクリックしてキャッシュを選択してください。")
-            return None, "cache", "", None
-        d = docs[idx]
+        d = by_hash[sel_hash]
         # チャンク本文を先読み（軽い）。無ければ古いエントリ＝選べないので明示する。
         cached_chunks = _ner_cache().get_chunks(d.content_hash)
         if not cached_chunks:
