@@ -131,6 +131,12 @@ def extract_chunks_from_upload(uploaded_file) -> list[str]:
         tmp_path.unlink(missing_ok=True)
 
 
+def _short_models(models: tuple[str, ...]) -> str:
+    """NER モデル名を短い別名に（一覧表示用）。"""
+    names = {"ja_ginza_electra": "electra", "ja_ginza": "ginza"}
+    return ", ".join(names.get(m, m) for m in models)
+
+
 def _kb_doc_label(meta: dict) -> str:
     """kb-mcp 文書メタから表示名を作る。"""
     name = meta.get("title") or meta.get("file_name") or meta.get("id") or "?"
@@ -205,9 +211,28 @@ def render_input(
             badge = "✓ " if _kb_doc_label(docs[i]) in cached_kb else ""
             return badge + _kb_doc_label(docs[i])
 
+        # 一覧（閲覧用・読み取り専用）。選択は下の selectbox で行う（位置ベース選択の取り違えを避ける）。
+        st.caption(f"kb-mcp 文書: {len(docs)} 件（📦＝キャッシュ済みの目安）")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
+                        "名前": (
+                            m.get("title") or m.get("file_name") or m.get("id") or "?"
+                        ),
+                        "パス": m.get("file_path") or "",
+                    }
+                    for m in docs
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+            column_config={"📦": st.column_config.TextColumn("📦", width="small")},
+        )
         # selectbox は型入力で絞り込み可。「✓」＝キャッシュ済み（名前一致の目安）。
         idx = st.selectbox(
-            "文書を選択（頭の ✓ ＝キャッシュ済みの目安。入力して絞り込み可）",
+            "上の一覧から文書を選択（頭の ✓ ＝キャッシュ済みの目安。入力して絞り込み可）",
             options=range(len(docs)),
             format_func=_kb_label,
             key="kb_pick",
@@ -233,9 +258,29 @@ def render_input(
                 "ここから入力元に選べるようになります。"
             )
             return None, "cache", "", None
-        # content_hash を値にする＝解析で並び替わっても選択が保たれる（位置ベースだと
-        # 解析→created_at 更新→先頭移動でズレ、別文書を解析してしまう）。selectbox は
-        # 常に有効な選択を返すので「選択喪失→stored へフォールバック」も起きない。
+        # 一覧（閲覧用・読み取り専用）。選択は下の selectbox で行う。
+        # 位置ベース選択（st.dataframe の行選択）は、解析→created_at 更新→先頭移動で並び替わると
+        # 別文書を選んでしまうため使わない（実際にそのバグを踏んだ）。一覧は見せ、選択は値で。
+        st.caption(f"キャッシュ済み: {len(docs)} 文書")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "ソース": d.source_name,
+                        "種別": d.source_kind,
+                        "チャンク": d.chunk_count,
+                        "文字数": d.char_count,
+                        "モデル": _short_models(d.models),
+                        "解析日時": d.created_at,
+                    }
+                    for d in docs
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        # content_hash を値にする＝解析で並び替わっても選択が保たれる。selectbox は常に有効な
+        # 選択を返すので取り違えが起きない。型入力で絞り込み可。
         by_hash = {d.content_hash: d for d in docs}
 
         def _cache_label(h: str) -> str:
@@ -245,7 +290,7 @@ def render_input(
             )
 
         sel_hash = st.selectbox(
-            "キャッシュ済み文書を選択（入力して絞り込み可）",
+            "上の一覧から文書を選択（入力して絞り込み可）",
             options=list(by_hash.keys()),
             format_func=_cache_label,
             key="cache_pick",
@@ -702,10 +747,6 @@ def render_cache_view() -> None:
             "登録され、次回以降の解析が高速になります。"
         )
         return
-
-    def _short_models(models: tuple[str, ...]) -> str:
-        names = {"ja_ginza_electra": "electra", "ja_ginza": "ginza"}
-        return ", ".join(names.get(m, m) for m in models)
 
     st.caption(
         f"キャッシュ済み: {len(docs)} 文書　"
