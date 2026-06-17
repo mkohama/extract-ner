@@ -129,6 +129,18 @@ class NerCache:
                 ),
             )
 
+    def get_source(self, content_hash: str) -> tuple[str, str] | None:
+        """記録済み文書の ``(source_kind, source_name)`` を返す（無ければ None）。
+
+        キャッシュ入力での再解析時に**元の種別を保つ**ために使う（"cache" で上書きしない）。
+        """
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT source_kind, source_name FROM documents WHERE content_hash = ?",
+                (content_hash,),
+            ).fetchone()
+        return (row[0], row[1]) if row else None
+
     def get_chunks(self, content_hash: str) -> list[str] | None:
         """記録済みのチャンク本文を返す（キャッシュを入力元に使う）。無ければ None。"""
         with self._conn() as c:

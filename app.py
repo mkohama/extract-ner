@@ -1179,12 +1179,15 @@ def main() -> None:
                     }
                     # 文書メタ＋チャンクを記録（NER 層は engine 側で自動保存済み）。
                     # チャンクも保存＝「🗂 キャッシュから選択」で入力元に再利用できる。
-                    _ner_cache().record_document(
-                        content_hash(chunks),
-                        in_kind,
-                        src_label or "(無題)",
-                        chunks,
-                    )
+                    chash = content_hash(chunks)
+                    rec_kind, rec_name = in_kind, src_label or "(無題)"
+                    # キャッシュ入力での再解析は「入力方法」が cache なだけで、文書の出所は
+                    # 元のまま（file/kb/text）。種別を "cache" で潰さないよう既存メタを保つ。
+                    if in_kind == "cache":
+                        existing = _ner_cache().get_source(chash)
+                        if existing is not None:
+                            rec_kind, rec_name = existing
+                    _ner_cache().record_document(chash, rec_kind, rec_name, chunks)
                 else:
                     result, elapsed = analyze_ner(chunks, model_name, flatten_tables)
                     st.session_state[slot] = {
