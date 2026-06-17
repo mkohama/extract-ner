@@ -167,6 +167,15 @@ class NerCache:
             c.execute("DELETE FROM ner WHERE content_hash = ?", (content_hash,))
             c.execute("DELETE FROM documents WHERE content_hash = ?", (content_hash,))
 
+    def delete_ner(self, content_hash: str) -> None:
+        """**NER 層だけ**破棄する（文書メタ・チャンク本文は残す）。
+
+        前処理やモデルの改善を反映したいときに使う。次回 :meth:`get` がミスして再解析され、
+        新しい NER 結果が :meth:`put` で入る。文書メタを残すので一覧・キャッシュ選択は維持される。
+        """
+        with self._conn() as c:
+            c.execute("DELETE FROM ner WHERE content_hash = ?", (content_hash,))
+
     def get(self, content_hash: str, model: str, flatten: bool) -> Analysis | None:
         with self._conn() as c:
             row = c.execute(
