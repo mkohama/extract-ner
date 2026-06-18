@@ -398,8 +398,20 @@ class MaskingEngine:
         # 実辞書の票（確定の根拠）。両フェーズで共通。
         dict_raw = matches_raw(self.dictionary, "dict", "(辞書)")
 
+        # `embed: true` の辞書語をサブワード境界で内包照合（SmashMark の Smash、CBMark の CB 等）。
+        #   命中はトークン全体でなく**一致したサブワード部分だけ**を span に。dict 票＝確定扱い。
+        embed_raw: list[Candidate] = []
+        for ti, sub_s, sub_e, _canon, category in self.dictionary.embedded_matches(
+            surfaces
+        ):
+            es = tokens[ti].start + sub_s
+            ee = tokens[ti].start + sub_e
+            embed_raw.append(
+                _raw(es, ee, text, category, ("dict", f"{category}(辞書·内包)"))
+            )
+
         # フェーズ① 実辞書で確信度づけ
-        clusters = _cluster(text, dict_raw + other_raw)
+        clusters = _cluster(text, dict_raw + embed_raw + other_raw)
 
         # フェーズ② 強の clean な語＋選択語を「確認済み」として昇格し、分割と確信度づけを再実行。
         #   昇格票は実辞書とは**別チャネル `session`**（→ 確定ではなく強）。確定は実辞書のみ。
@@ -407,7 +419,9 @@ class MaskingEngine:
             promoted = _promoted_dictionary(self.dictionary, clusters, extra_terms)
             if promoted is not None:
                 session_raw = matches_raw(promoted, "session", "(確認済)")
-                clusters = _cluster(text, dict_raw + session_raw + other_raw)
+                clusters = _cluster(
+                    text, dict_raw + embed_raw + session_raw + other_raw
+                )
 
         # 連絡先（メール等）を正規表現で確定検出し、重なる他候補を退けて 1 件まるごとにする。
         #   例：辞書社名 exmotion を内包する `x@exmotion.co.jp` を、社名で割らずメール 1 候補に。

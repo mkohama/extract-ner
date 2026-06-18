@@ -626,6 +626,7 @@ def _apply_selection(engine, analysis, sel: set):
 
 def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
     """実体ごと：同じ語は文書内の全出現を一括マスク。``confidences`` で表示する確信度を絞る。"""
+
     def _group_mask_rank(g) -> int:
         spans = {(m.start, m.end) for m in g.members}
         if spans <= sel:  # 全出現が選択＝マスク（チェック ON）
@@ -816,10 +817,11 @@ def render_dict_editor(dict_path: str) -> None:
             "代表表記": e["canonical"],
             "別名": ", ".join(e["aliases"]),
             "置換": e["mask"],
+            "内包": e["embed"],
         }
         for e in entries
     ]
-    df = pd.DataFrame(rows, columns=["カテゴリ", "代表表記", "別名", "置換"])
+    df = pd.DataFrame(rows, columns=["カテゴリ", "代表表記", "別名", "置換", "内包"])
     edited = st.data_editor(
         df,
         num_rows="dynamic",
@@ -831,6 +833,12 @@ def render_dict_editor(dict_path: str) -> None:
                 "カテゴリ", options=["社名", "商標", "人名"], default="社名"
             ),
             "置換": st.column_config.TextColumn("置換", help="空なら自動採番"),
+            "内包": st.column_config.CheckboxColumn(
+                "内包",
+                default=False,
+                help="複合語の中（例 SmashMark の Smash、CBMark の CB）も伏字にする。"
+                "境界一致なので ECBType の CB は拾わない。",
+            ),
         },
     )
     if st.button("💾 辞書を保存", type="primary", key="dict_save"):
@@ -846,6 +854,7 @@ def render_dict_editor(dict_path: str) -> None:
                 "canonical": cell(r["代表表記"]),
                 "aliases": [a.strip() for a in cell(r["別名"]).split(",") if a.strip()],
                 "mask": cell(r["置換"]),
+                "embed": bool(r["内包"]) if not pd.isna(r["内包"]) else False,
             }
             for _, r in edited.iterrows()
         ]
