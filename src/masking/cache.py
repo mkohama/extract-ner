@@ -97,6 +97,12 @@ class NerCache:
             cols = [r[1] for r in c.execute("PRAGMA table_info(documents)").fetchall()]
             if "chunks_json" not in cols:
                 c.execute("ALTER TABLE documents ADD COLUMN chunks_json TEXT")
+            # 作業ドラフトの手動選択（auto からの差分）を文書単位で保存する。
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS mask_draft ("
+                "content_hash TEXT PRIMARY KEY, "
+                "added_json TEXT, removed_json TEXT, updated_at TEXT)"
+            )
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path)
@@ -128,6 +134,41 @@ class NerCache:
                     json.dumps(list(chunks), ensure_ascii=False),
                 ),
             )
+
+    def save_draft(
+        self,
+        content_hash: str,
+        added: set[tuple[int, int]],
+        removed: set[tuple[int, int]],
+    ) -> None:
+        """作業ドラフトの手動選択（auto からの差分）を保存。同じ content_hash は上書き。"""
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO mask_draft "
+                "(content_hash, added_json, removed_json, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    content_hash,
+                    json.dumps([list(s) for s in added]),
+                    json.dumps([list(s) for s in removed]),
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+
+    def get_draft(
+        self, content_hash: str
+    ) -> tuple[set[tuple[int, int]], set[tuple[int, int]]] | None:
+        """保存済みの手動選択差分 (added, removed) を返す。無ければ None。"""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT added_json, removed_json FROM mask_draft WHERE content_hash = ?",
+                (content_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+        added = {(s[0], s[1]) for s in json.loads(row[0] or "[]")}
+        removed = {(s[0], s[1]) for s in json.loads(row[1] or "[]")}
+        return added, removed
 
     def get_source(self, content_hash: str) -> tuple[str, str] | None:
         """記録済み文書の ``(source_kind, source_name)`` を返す（無ければ None）。

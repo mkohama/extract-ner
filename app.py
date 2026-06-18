@@ -1001,10 +1001,18 @@ def render_masking_result(stored: dict) -> None:
         )
     by_entity = unit.startswith("実体")
 
-    # 共有選択（マスクする span 集合）。初期値＝自動マスク（確定/強）＝現状と同一。
+    # 共有選択（マスクする span 集合）＝ auto（確定/強）＋ 保存済みドラフト（手動の差分）。
+    # ドラフトは content_hash 単位で DB に永続化するので、**再起動・再解析でも手動選択が消えない**。
     # 実体ごと/出現ごとの両ビューがこの 1 つの集合を読み書きするので、切替で選択が消えない。
+    chash = content_hash(chunks)
+    auto = _auto_mask_spans(analysis)
     if "mask_sel" not in stored:
-        stored["mask_sel"] = _auto_mask_spans(analysis)
+        draft = _ner_cache().get_draft(chash)
+        if draft is not None:
+            added, removed = draft
+            stored["mask_sel"] = (auto | added) - removed  # auto ∪ added − removed
+        else:
+            stored["mask_sel"] = set(auto)
         stored["mask_ver"] = 0
     sel = stored["mask_sel"]
     ver = stored["mask_ver"]
@@ -1045,6 +1053,13 @@ def render_masking_result(stored: dict) -> None:
             f"除外リストに {added} 件追加し、再解析なしで反映しました（計 {len(merged)} 件）。"
         )
         st.rerun()
+
+    # 手動選択（auto からの差分）を文書単位で永続化（変化時のみ）。再起動/再解析で復元される。
+    if stored.get("_draft_saved") != stored["mask_sel"]:
+        _ner_cache().save_draft(
+            chash, stored["mask_sel"] - auto, auto - stored["mask_sel"]
+        )
+        stored["_draft_saved"] = set(stored["mask_sel"])
 
     # 共有選択から結果を作る（ビュー非依存＝sel の span だけをマスク。切替で広がらない）。
     result = _apply_selection(engine, analysis, stored["mask_sel"])
