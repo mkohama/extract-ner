@@ -1355,7 +1355,9 @@ def main() -> None:
 
     stored = st.session_state.get(slot)  # クリックで更新された可能性があるので取り直す
     if not stored:
-        output.info("入力を指定して [🔍 解析する] を押してください。")
+        # クリック時はハンドラ側が案内（未選択）やエラーを output に表示済み。上書きしない。
+        if not clicked:
+            output.info("入力を指定して [🔍 解析する] を押してください。")
         return
 
     # 解析結果は placeholder の中に描く（クリック時はスピナー表示を結果で置き換える）。
