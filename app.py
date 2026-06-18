@@ -692,7 +692,9 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
         new_sel = set(sel)
         for g, on, ex in zip(groups, masks, excludes):
             spans = {(m.start, m.end) for m in g.members}
-            was_on = spans <= sel  # 表示時のチェック状態（全出現が選択済み＝チェック ON）
+            was_on = (
+                spans <= sel
+            )  # 表示時のチェック状態（全出現が選択済み＝チェック ON）
             if ex or (was_on and not on):  # 除外 or チェックを外した → 全出現を削除
                 new_sel -= spans
             elif on and not was_on:  # 新たにチェック → 全出現を追加
@@ -1267,18 +1269,18 @@ def main() -> None:
     # cache/kb は **選択を fragment 内で行う**ため、行クリックでは外側（このボタン）が再実行されず
     #   選択が反映されない。そこでボタンを選択に依存させず、モデルさえあれば押せるようにし、
     #   未選択のクリックは下のハンドラで案内する（stored への誤フォールバックはしない）。
-    # 「解析する」は**実際に解析できるとき**だけ活性にする（文書未選択で押せて何も起きない、を防ぐ）。
-    # cache/kb は一覧から行を選ぶと get_chunks が非 None になる＝それで can_fresh が立つ。
     models_ok = not (masking_mode and not models)
     can_fresh = get_chunks is not None and models_ok
     can_reuse_stored = input_kind == "file" and stored is not None and models_ok
-    can_analyze = can_fresh or can_reuse_stored
+    # cache/kb は選択を fragment 内で行う＝行クリックでは外側（このボタン）が再実行されず選択が
+    # 反映されない。ので選択に依存させず、モデルがあれば押せるようにする（クリック＝本体再実行で
+    # 選択が解決される）。未選択のままのクリックは下のハンドラで案内する。
+    can_select_list = input_kind in ("cache", "kb") and models_ok
+    can_analyze = can_fresh or can_reuse_stored or can_select_list
     clicked = st.button("🔍 解析する", type="primary", disabled=not can_analyze)
-    if not can_analyze:  # なぜ押せないかを明示（誤解防止）
+    if not can_analyze:  # なぜ押せないかを明示（モデル未選択 / 入力未指定）
         if masking_mode and not models:
             st.caption("⚠ サイドバーでモデルを 1 つ以上選択してください。")
-        elif input_kind in ("cache", "kb"):
-            st.caption("⚠ 一覧から文書を選択すると [🔍 解析する] が押せます。")
         else:
             st.caption("⚠ 入力（テキスト／ファイル／kb-mcp）を指定すると押せます。")
 
