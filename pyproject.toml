@@ -68,6 +68,8 @@ module = [
     "pandas.*",
     "pdfminer",
     "pdfminer.*",
+    "pii_masker",
+    "pii_masker.*",
     "pptx",
     "pptx.*",
     "pydantic",
