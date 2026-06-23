@@ -32,6 +32,9 @@ from src.masking import (
     save_allowlist_entries,
     save_entries,
 )
+from src.llm import cached_detect
+from src.llm.schema import LlmDetection
+from src.masking.engine import vote_category
 from src.ner import (
     AVAILABLE_MODELS,
     DEFAULT_COLOR,
@@ -41,6 +44,7 @@ from src.ner import (
     render_html,
     render_masking_html,
 )
+from src.ner.preprocess import build_body
 from src.sources import SAMPLE_TEXT, load_chunks_from_file
 from src.sources.kb_mcp import (
     DEFAULT_KB_MCP_URL,
@@ -969,8 +973,12 @@ def analyze_masking(
     flatten_tables: bool,
     dict_path: str,
     allowlist_path: str,
+    llm_detection: LlmDetection | None = None,
 ):
-    """マスキング検出（重い）。ボタン押下時のみ呼ぶ。"""
+    """マスキング検出（重い）。ボタン押下時のみ呼ぶ。
+
+    ``llm_detection`` を渡すと LLM 検出を ``llm`` チャネルとして票に合流する（出口2）。
+    """
     engine = get_masking_engine(tuple(models), dict_path)
     allowlist = _load_allowlist(allowlist_path)
     status = st.empty()
@@ -980,9 +988,91 @@ def analyze_masking(
         allowlist=allowlist,
         ner_cache=_ner_cache(),
         progress=_stage_callback(status, len(chunks)),
+        llm_detection=llm_detection,
     )
     status.empty()
     return analysis
+
+
+# detector_version: プロンプト（pii-masker 版）＋窓ポリシー＋type-map をまとめた版。
+# これを変えると LLM 検出キャッシュが自動ミス→再取得（§6）。
+_DETECTOR_VERSION = "pii-masker@9d9942e|win7000ov200|ene-v1"
+
+
+def run_llm_detection(
+    chunks: list[str], flatten_tables: bool
+) -> tuple[str, LlmDetection]:
+    """LLM 検出（Stage A）を実行（キャッシュ越し）。本文 ``text`` と ``LlmDetection`` を返す。
+
+    pii-masker を呼ぶ（実機・Azure・``az login`` 前提）。キャッシュは
+    ``(content_hash, model, flatten, detector_version)`` で、同一文書は再呼び出ししない。
+    """
+    body = build_body(chunks, flatten_tables=flatten_tables)
+    detection = cached_detect(
+        _ner_cache(),
+        content_hash(chunks),
+        body.text,
+        flatten=flatten_tables,
+        detector_version=_DETECTOR_VERSION,
+    )
+    return body.text, detection
+
+
+def render_llm_result(body_text: str, detection: LlmDetection) -> None:
+    """LLM 単独ビュー（出口1）：LLM が拾った検出だけを displaCy＋表で表示する。"""
+    st.caption(
+        f"モデル: `{detection.model}` / detector_version: `{detection.detector_version}`"
+        "　— LLM（pii-masker）が拾った検出のみ。GiNZA/辞書とは混ぜない素の結果。"
+    )
+    col_main, col_side = st.columns([3, 1])
+    with col_side:
+        st.metric("検出（位置特定済み）", f"{len(detection.spans)} 件")
+        st.metric("位置特定できなかった検出", f"{len(detection.not_found)} 件")
+    with col_main:
+        spans = [
+            (s.start, s.end, vote_category("llm", s.ene_type) or "その他")
+            for s in detection.spans
+        ]
+        html = render_masking_html(body_text, spans)
+        st.html(
+            '<div style="height:400px; overflow:auto; resize:vertical; '
+            "line-height:2.2; border:1px solid rgba(128,128,128,0.25); "
+            f'border-radius:6px; padding:0.5em;">{html}</div>'
+        )
+
+    if detection.spans:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "type(ENE)": s.ene_type,
+                        "カテゴリ": vote_category("llm", s.ene_type) or "その他",
+                        "テキスト": body_text[s.start : s.end],
+                        "位置": f"{s.start}-{s.end}",
+                        "一致": s.how,
+                        "理由": s.reason or "",
+                    }
+                    for s in detection.spans
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+    else:
+        st.write("LLM の検出はありませんでした。")
+
+    if detection.not_found:
+        st.warning(
+            f"本文に位置特定できなかった検出が {len(detection.not_found)} 件あります"
+            "（綴りのゆれ等。要確認）。"
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [{"type(ENE)": t, "テキスト": x} for t, x in detection.not_found]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
 
 
 def render_masking_result(stored: dict) -> None:
@@ -1139,6 +1229,117 @@ def render_masking_result(stored: dict) -> None:
         )
     else:
         st.write("マスク対象が選択されていません。")
+
+
+def _render_state_header(stored: dict) -> None:
+    """選択ソースのパイプライン状態（冒頭設計図のミニ版）。保存物から導出して表示する。"""
+    has_ner = stored.get("analysis") is not None
+    has_llm = stored.get("llm") is not None
+    draft = _ner_cache().get_draft(content_hash(stored["chunks"]))
+    merge = "✅" if has_ner else "⬜"
+    if has_ner and draft and (draft[0] or draft[1]):
+        merge += "（レビュー中・下書きあり）"
+    st.caption(
+        "パイプライン状態:　平文 ✅　→　"
+        f"NER検出 {'✅' if has_ner else '⬜'}　＋　LLM検出 {'✅' if has_llm else '⬜'}　→　"
+        f"マージ&確信度 {merge}　→　確定 ⬜"
+    )
+
+
+def _render_ner_tab(stored: dict) -> None:
+    """NER検出タブ：GiNZA が拾った候補の独立ビュー（辞書/LLM とは別レンズ。再解析しない）。"""
+    analysis = stored["analysis"]
+    ner_channels = {"ja_ginza", "ja_ginza_electra"}
+    cands = [
+        c for c in analysis.candidates if any(ch in ner_channels for ch, _ in c.votes)
+    ]
+    st.caption(
+        f"GiNZA(NER) 由来の候補 {len(cands)} 件（独立ビュー）。確信度・票はマージ&確信度タブで確定。"
+    )
+    if not cands:
+        st.write("NER 由来の候補はありません。")
+        return
+    html = render_masking_html(
+        analysis.text, [(c.start, c.end, c.category) for c in cands]
+    )
+    st.html(
+        '<div style="height:360px; overflow:auto; resize:vertical; line-height:2.2; '
+        "border:1px solid rgba(128,128,128,0.25); border-radius:6px; "
+        f'padding:0.5em;">{html}</div>'
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "テキスト": c.surface,
+                    "カテゴリ": c.category,
+                    "確信度": c.confidence,
+                    "ja_ginza": c.vote_labels("ja_ginza"),
+                    "electra": c.vote_labels("ja_ginza_electra"),
+                }
+                for c in cands
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+
+
+def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
+    """LLM検出タブ（出口1）：pii-masker による検出を実行・表示。実行するとマージにも反映する。"""
+    chunks = stored["chunks"]
+    if st.button("▶ LLM 検出を実行・更新", type="primary", key="run_llm"):
+        try:
+            with st.spinner("LLM（gpt-4.1-mini / pii-masker）で検出中 ..."):
+                body_text, detection = run_llm_detection(chunks, flatten_tables)
+        except Exception as e:  # noqa: BLE001
+            st.error(
+                f"LLM 検出に失敗しました: {e}\n"
+                "（実機で `az login` 済みか、.env の RESOURCE_NAME_GPT41_MINI を確認）"
+            )
+        else:
+            stored["llm"] = {"body_text": body_text, "detection": detection}
+            # マージ&確信度へ反映：LLM 票込みで再解析（NER はキャッシュで高速）し、選択を再導出。
+            stored["analysis"] = analyze_masking(
+                chunks,
+                stored["models"],
+                flatten_tables,
+                stored["dict_path"],
+                stored["allowlist_path"],
+                llm_detection=detection,
+            )
+            stored.pop("mask_sel", None)
+            stored.pop("_draft_saved", None)
+            stored["mask_ver"] = stored.get("mask_ver", 0) + 1
+            st.success(
+                f"LLM 検出 {len(detection.spans)} 件。マージ&確信度タブに合流しました。"
+            )
+            st.rerun()
+
+    llm = stored.get("llm")
+    if not llm:
+        st.info(
+            "『▶ LLM 検出を実行・更新』で gpt-4.1-mini（pii-masker 経由）による検出を行います。"
+            "結果は本タブ（出口1）に表示し、マージ&確信度タブにも `llm` 票として合流します。"
+        )
+        return
+    render_llm_result(llm["body_text"], llm["detection"])
+
+
+def _render_pipeline(stored: dict, flatten_tables: bool) -> None:
+    """1ソース＝1パイプライン：状態ヘッダー＋各ステージのタブ（§12）。"""
+    _render_state_header(stored)
+    tab_plain, tab_ner, tab_llm, tab_merge = st.tabs(
+        ["📄 平文", "🔍 NER検出", "🤖 LLM検出", "🔒 マージ&確信度"]
+    )
+    with tab_plain:
+        _render_extracted_text(stored["chunks"])
+    with tab_ner:
+        _render_ner_tab(stored)
+    with tab_llm:
+        _render_llm_tab(stored, flatten_tables)
+    with tab_merge:
+        render_masking_result(stored)
 
 
 def main() -> None:
@@ -1412,13 +1613,14 @@ def main() -> None:
                 "最新の結果にするには [🔍 解析する] を押してください。"
             )
 
-        # ファイル/kb-mcp はテキスト化を経るので、解析した平文を確認できるようにする。
-        if stored["input_kind"] != "text":
-            _render_extracted_text(stored["chunks"])
-
         if masking_mode:
-            render_masking_result(stored)
+            # 1ソース＝1パイプライン：平文/NER検出/LLM検出/マージ&確信度 のタブで見せる（§12）。
+            #   平文はタブ内に置くので、ここでの inline 表示はしない。
+            _render_pipeline(stored, flatten_tables)
         else:
+            # NER ビューア（参考）：従来どおり。テキスト化平文を先に出してから結果表示。
+            if stored["input_kind"] != "text":
+                _render_extracted_text(stored["chunks"])
             render_ner_result(stored, view_height=view_height, font_size=font_size)
 
 
