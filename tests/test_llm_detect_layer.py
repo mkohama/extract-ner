@@ -122,6 +122,22 @@ def test_overlap_duplicate_is_resolved() -> None:
     assert text[s.start : s.end] == "TARGET"
 
 
+def test_progress_called_per_window() -> None:
+    """progress(i, n) が窓ごとに呼ばれる（UI 進捗表示用）。"""
+    text = CHUNK_SEPARATOR.join(["seg0", "seg1", "seg2"])
+    seen: list[tuple[int, int]] = []
+    detect_document(
+        text,
+        detector_version="v1",
+        max_tokens=1,  # 各セグメントを別窓に
+        overlap_tokens=0,
+        detect_fn=detect_from([]),
+        locate_fn=locate_first,
+        progress=lambda i, n: seen.append((i, n)),
+    )
+    assert seen == [(0, 3), (1, 3), (2, 3)]
+
+
 def test_empty_text() -> None:
     det = detect_document(
         "",

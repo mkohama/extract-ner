@@ -993,12 +993,18 @@ _DETECTOR_VERSION = "pii-masker@9d9942e|win7000ov200|ene-v1"
 
 
 def run_llm_detection(
-    chunks: list[str], flatten_tables: bool
+    chunks: list[str],
+    flatten_tables: bool,
+    *,
+    force: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[str, LlmDetection]:
     """LLM 検出（Stage A）を実行（キャッシュ越し）。本文 ``text`` と ``LlmDetection`` を返す。
 
     pii-masker を呼ぶ（実機・Azure・``az login`` 前提）。キャッシュは
     ``(content_hash, model, flatten, detector_version)`` で、同一文書は再呼び出ししない。
+    ``force=True`` でキャッシュ無視の再検出（LLM 層のみ。NER キャッシュには触れない）。
+    ``progress(i, n)`` は窓ごとの進捗（キャッシュヒット時は呼ばれない）。
     """
     body = build_body(chunks, flatten_tables=flatten_tables)
     detection = cached_detect(
@@ -1007,6 +1013,8 @@ def run_llm_detection(
         body.text,
         flatten=flatten_tables,
         detector_version=_DETECTOR_VERSION,
+        progress=progress,
+        force=force,
     )
     return body.text, detection
 
@@ -1275,6 +1283,11 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
         return
 
     analysis = stored["ner"]
+    if analysis.timings:
+        total = sum(s for _, s in analysis.timings)
+        st.success(
+            _timing_caption(analysis.timings, total, len(stored["chunks"])), icon="✅"
+        )
     ner_channels = {"ja_ginza", "ja_ginza_electra"}
     cands = [
         c for c in analysis.candidates if any(ch in ner_channels for ch, _ in c.votes)
@@ -1313,34 +1326,63 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
 
 def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
     """LLM検出タブ（独立経路・出口1）：pii-masker による検出を実行・表示する。"""
-    if st.button("▶ LLM 検出を実行・更新", type="primary", key="run_llm"):
+    has = "llm" in stored
+    force = st.checkbox(
+        "🔄 LLM をやり直す（キャッシュを無視）",
+        key="llm_force",
+        help="同じ文書は既定でキャッシュを使い再呼び出ししません（Azure 節約）。"
+        "プロンプト改善などを反映したいときに ON で再検出します（NER キャッシュには触れません）。",
+    )
+    if st.button(
+        "▶ LLM 検出を再実行" if has else "▶ LLM 検出を実行",
+        type="primary",
+        key="run_llm",
+    ):
+        status = st.empty()
+
+        def _cb(
+            i: int, n: int
+        ) -> None:  # 窓ごとの進捗（キャッシュヒット時は呼ばれない）
+            status.info(f"⏳ LLM 検出中 … 窓 {i + 1}/{n}（gpt-4.1-mini / pii-masker）")
+
         try:
-            with st.spinner("LLM（gpt-4.1-mini / pii-masker）で検出中 ..."):
-                body_text, detection = run_llm_detection(
-                    stored["chunks"], flatten_tables
-                )
+            t0 = time.perf_counter()
+            body_text, detection = run_llm_detection(
+                stored["chunks"], flatten_tables, force=force, progress=_cb
+            )
+            elapsed = time.perf_counter() - t0
         except Exception as e:  # noqa: BLE001
+            status.empty()
             st.error(
                 f"LLM 検出に失敗しました: {e}\n"
                 "（実機で `az login` 済みか、.env の RESOURCE_NAME_GPT41_MINI を確認）"
             )
         else:
-            stored["llm"] = {"body_text": body_text, "detection": detection}
+            status.empty()
+            stored["llm"] = {
+                "body_text": body_text,
+                "detection": detection,
+                "elapsed": elapsed,
+            }
             # マージは LLM 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
             stored.pop("analysis", None)
             stored.pop("mask_sel", None)
             stored.pop("_draft_saved", None)
-            st.success(
-                f"LLM 検出 {len(detection.spans)} 件。マージ&確信度タブで合流できます。"
-            )
 
     llm = stored.get("llm")
     if not llm:
         st.info(
-            "『▶ LLM 検出を実行・更新』で gpt-4.1-mini（pii-masker 経由）による検出を行います"
+            "『▶ LLM 検出を実行』で gpt-4.1-mini（pii-masker 経由）による検出を行います"
             "（NER とは独立。結果は本タブ＝出口1 に表示）。"
         )
         return
+    if llm.get("elapsed") is not None:
+        n = len(llm["detection"].spans)
+        st.success(
+            f"⏱ LLM 検出 {llm['elapsed']:.1f}s（{n} 件）"
+            "　※2 回目以降はキャッシュで一瞬（やり直しは上のチェック）。",
+            icon="✅",
+        )
     render_llm_result(llm["body_text"], llm["detection"])
 
 

@@ -28,6 +28,8 @@ DEFAULT_MODEL = "gpt-4.1-mini"
 # 構造的に受けるため Any で扱う（アダプタ境界。型は pii-masker 管轄）。
 DetectFn = Callable[..., Sequence[Any]]
 LocateFn = Callable[..., tuple[Sequence[Any], Sequence[Any]]]
+# progress(window_index, total_windows)。UI の進捗表示用（任意）。
+ProgressFn = Callable[[int, int], None]
 
 
 def _default_detect(document: str, *, model: str) -> Sequence[Any]:
@@ -55,6 +57,7 @@ def detect_document(
     overlap_tokens: int = DEFAULT_OVERLAP_TOKENS,
     detect_fn: DetectFn | None = None,
     locate_fn: LocateFn | None = None,
+    progress: ProgressFn | None = None,
 ) -> LlmDetection:
     """J1 本文 ``text`` に対し LLM 検出を行い :class:`LlmDetection`（全文座標）を返す。
 
@@ -62,13 +65,17 @@ def detect_document(
     ``locate_fn(w, ents)`` で窓内スパン → ``+ws`` で全文座標へ → 全窓を集約し重なりを解消。
 
     ``detect_fn`` / ``locate_fn`` 未指定時は pii-masker を呼ぶ（実機）。テストでは差し替える。
+    ``progress(i, n)`` を渡すと各窓の検出前に (窓index, 全窓数) を通知する（UI 進捗表示用）。
     """
     detect_fn = detect_fn or _default_detect
     locate_fn = locate_fn or _default_locate
 
     spans: list[LlmSpan] = []
     not_found: list[tuple[str, str]] = []
-    for ws, we in iter_windows(text, max_tokens=max_tokens, overlap=overlap_tokens):
+    windows = iter_windows(text, max_tokens=max_tokens, overlap=overlap_tokens)
+    for i, (ws, we) in enumerate(windows):
+        if progress is not None:
+            progress(i, len(windows))
         window = text[ws:we]
         entities = detect_fn(window, model=model)
         matches, nf = locate_fn(window, entities)
@@ -128,15 +135,20 @@ def cached_detect(
     overlap_tokens: int = DEFAULT_OVERLAP_TOKENS,
     detect_fn: DetectFn | None = None,
     locate_fn: LocateFn | None = None,
+    progress: ProgressFn | None = None,
+    force: bool = False,
 ) -> LlmDetection:
     """LLM 検出をキャッシュ越しに行う（NER 層と同じ「激重層だけキャッシュ」）。
 
     ``(content_hash, model, flatten, detector_version)`` でヒットすれば pii-masker を呼ばない。
     ``detector_version`` を上げると自動ミス→再取得（プロンプト/窓ポリシー改版の反映）。
+    ``force=True`` でキャッシュを無視して再検出し上書きする（NER キャッシュには触れない）。
+    ``progress(i, n)`` は detect_document へ渡る（キャッシュヒット時は呼ばれない＝即返り）。
     """
-    hit = cache.get_llm(content_hash, model, flatten, detector_version)
-    if hit is not None:
-        return detection_from_json(hit)
+    if not force:
+        hit = cache.get_llm(content_hash, model, flatten, detector_version)
+        if hit is not None:
+            return detection_from_json(hit)
     detection = detect_document(
         text,
         detector_version=detector_version,
@@ -145,6 +157,7 @@ def cached_detect(
         overlap_tokens=overlap_tokens,
         detect_fn=detect_fn,
         locate_fn=locate_fn,
+        progress=progress,
     )
     cache.put_llm(
         content_hash, model, flatten, detector_version, detection_to_json(detection)

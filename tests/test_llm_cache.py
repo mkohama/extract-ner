@@ -105,3 +105,16 @@ def test_cached_detect_runs_once_then_hits_cache(tmp_path) -> None:
     # detector_version を上げるとミス＝再検出
     run("v2")
     assert calls["n"] == 2
+
+    # force=True は同じ鍵でもキャッシュを無視して再検出する（やり直し）
+    cached_detect(
+        cache,
+        "h",
+        text,
+        flatten=False,
+        detector_version="v1",
+        detect_fn=detect_fn,
+        locate_fn=locate_fn,
+        force=True,
+    )
+    assert calls["n"] == 3
