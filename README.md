@@ -5,15 +5,17 @@ data-redactor は GiNZA ベースの**日本語ドキュメント機密マスキ
 LLM へ渡す前の前処理として、人名・社名・商標・連絡先（メール等）などの機密情報を検出し、
 伏せ字（`[社1]` など）に置き換えることを目標にしています。
 
-検出は次の合議で行います。
+検出は複数チャネルの合議で行います。チャネルは独立していて、**走ったチャネルだけを集約**します。
 
-- マスク辞書（社名・商標・人名の名簿）
-- Sudachi の品詞（人名・地名・固有名詞）
-- GiNZA NER（`ja_ginza_electra` と `ja_ginza` の 2 モデル）
-- 連絡先の正規表現（メール）
+- **ルールベース（常時）**: マスク辞書（社名・商標・人名の名簿）＋ 連絡先の正規表現（メール）。
+- **NER（任意・重い）**: Sudachi 品詞 ＋ GiNZA NER（`ja_ginza_electra` と `ja_ginza` の 2 モデル）。
+- **LLM（任意・要 `az login`）**: pii-masker（Azure OpenAI `gpt-4.1-mini`）による文脈判定。
+  人名/地名/外国人名/誤記など、辞書・NER で詰めきれない**文脈依存**の検出が得意。
 
 そのうえで確信度に応じて「自動マスク／要レビュー／非表示」に振り分けます。
 **recall 最優先**（マスク漏れ＝漏洩）の設計で、不確実なものは伏せずに人のレビューへ回します。
+
+> LLM は任意です。辞書＋正規表現＋NER だけでも動きます（その場合 LLM のセットアップは不要）。
 
 入力は、`.txt` / `.md` / `.pdf` / `.docx` / `.xlsx` / `.pptx` などのファイル、貼り付けテキスト、
 kb-mcp の文書に対応します（kb-mcp から移植した `DocumentLoader` でテキスト化 → チャンク分割 → 解析）。
@@ -30,6 +32,39 @@ uv sync
 
 Python 3.11 / spaCy 3.7 系 / numpy 1.x に固定しています
 （`ja_ginza_electra` の依存と GiNZA 5.2 の制約のため。3.12 や spaCy 3.8・numpy 2 では動作しません）。
+
+これで **辞書＋正規表現＋NER** のマスキングは動きます（LLM は不要）。
+
+### LLM 検出を使う場合（任意・実機）
+
+LLM 検出は **pii-masker**（別リポジトリ）を git submodule として取り込み、Azure OpenAI `gpt-4.1-mini` を呼びます。
+`uv sync` だけでは動きません。次の 4 つが必要です。
+
+```powershell
+# 1) pii-masker のソースを external/pii-masker に取得（git submodule）
+git submodule update --init
+#    ※新規 clone なら `git clone --recurse-submodules <url>` で 1 と同時に取得できます
+
+# 2) 依存をインストール（openai / azure-identity / pydantic などが入る）
+uv sync
+
+# 3) .env に Azure リソースを設定（.env.example をコピーして実値を入れる）
+#    RESOURCE_NAME_GPT41_MINI=<Azure リソース名>
+#    DEFAULT_LLM_MODEL=gpt-4.1-mini
+#    ※ pii-masker は呼び出し元（data-redactor）の .env を読むので、**ここ**に置きます
+
+# 4) Azure 認証（DefaultAzureCredential が使う）
+az login
+```
+
+仕組み（B2 方式）: pii-masker は `[build-system]` を持たない PoC なので pip インストールせず、
+`src/llm/_paths.py` が `external/pii-masker/src` を `sys.path` に通して `import pii_masker` を解決します
+（submodule 未取得なら自動でスキップ＝LLM 無しで動作）。LLM 検出の本体（プロンプト・Azure・locate）は
+pii-masker 側にあり、data-redactor は薄いアダプタ（[src/llm/](src/llm/)）から呼ぶだけです。
+
+> LLM のみ実機が別環境のとき: 本物の対象データ・`data/cache.db` は実機にしかありません。
+> このリポジトリ側（開発機）でも仕組みの動作確認はできますが、Azure 実呼び出しには `az login` と
+> `RESOURCE_NAME_GPT41_MINI` が必要です。
 
 ---
 
@@ -49,13 +84,22 @@ uv run data-redactor ui
 固有表現抽出（NER）の素の結果を見たいときは、サイドバーの **「🔍 NER ビューア（参考）」** トグルで開けます
 （参考ツール。OFF でマスキングに戻ります）。
 
-### マスキングの流れ
+### マスキングの流れ（1ソース＝1パイプライン）
 
-1. 入力方法（✏️ テキスト / 📄 ファイル / 📚 kb-mcp / 🗂 キャッシュから選択）を選ぶ。
-2. **[🔍 解析する]** を押すと候補を検出します（GiNZA 2 モデルを使うので時間がかかります。
-   進捗はステージ表示、所要時間は結果の先頭に出ます）。
-3. 候補表で確信度フィルタをかけつつ、チェックでマスク対象を選び、**[✅ マスクを反映]** を押します。
-   不要な誤検出は「除外」にチェック → **[🚫 選択を除外リストへ]** で以後どの文書でも候補外にできます。
+マスキング画面は「入力ソースを 1 つ選び、パイプラインの各ステージをタブで覗く」構成です。
+
+1. 入力方法（✏️ テキスト / 📄 ファイル / 📚 kb-mcp / 🗂 キャッシュから選択）を選び、**[📥 読み込む]** を押す
+   （チャンクを確定するだけ。重い解析はまだ走りません）。
+2. 状態ヘッダーと 4 タブが出ます。**各タブが独立した実行ボタン**を持ちます。
+   - **📄 平文** … テキスト化結果。
+   - **🔍 NER検出** … **[▶ NER 解析を実行]**（GiNZA 2 モデル。重い）。NER 由来候補の独立ビュー。
+   - **🤖 LLM検出** … **[▶ LLM 検出を実行]**（pii-masker / `gpt-4.1-mini`。要 `az login`）。LLM 単独の結果（出口1）。
+   - **🔒 マージ&確信度** … **[▶ マージ&確信度を実行]**。**辞書＋正規表現（常時）＋実行済みのチャネル**
+     （NER・LLM）を集約して候補化（出口2）。**GiNZA は NER 検出を実行したときだけ回ります**
+     （未実行なら辞書＋regex＋LLM で軽く完結）。
+3. マージ&確信度タブの候補表で確信度フィルタをかけつつチェックでマスク対象を選び、**[✅ マスクを反映]**。
+   候補表の `ja_ginza` / `electra` / `Sudachi` / `LLM` / `辞書` 列で、どのチャネルが投票したか分かります。
+   誤検出は「除外」→ **[🚫 選択を除外リストへ]** で以後どの文書でも候補外にできます。
 4. 結果は「色付き／マスク済み／原文」で確認・ダウンロードできます。
 
 確信度フィルタの既定は 確定・強・中・弱（**微弱・除外は既定で非表示**）。
@@ -70,7 +114,7 @@ uv run data-redactor ui
 uv run kb-mcp-server --transport http --port 8000
 ```
 
-UI で URL（既定 `http://localhost:8000/mcp`）を指定し、「文書リストを取得」→ 文書を選択 →「解析する」。
+UI で URL（既定 `http://localhost:8000/mcp`）を指定し、「文書リストを取得」→ 文書を選択 →「📥 読み込む」。
 本文は**チャンク単位**で取得します（kb-mcp は格納時に分割済みなので、結合せずそのまま解析します）。
 
 ---
@@ -100,6 +144,8 @@ uv run data-redactor debug report.pdf --both-models --all-tokens
 # 品質ゲート（ruff + mypy）
 uv run data-redactor check
 ```
+
+> LLM 検出は現状 **UI（🤖 LLM検出 タブ）のみ**で、CLI の `mask` は 辞書＋正規表現＋NER で動きます。
 
 ---
 
@@ -139,15 +185,19 @@ uv run data-redactor check
 
 ## 検出ロジックの要点
 
-- **候補生成**: マスク辞書 ∪ Sudachi 品詞 ∪ NER 2 モデル ∪ 連絡先の正規表現。
-- **確信度**（カテゴリ別の独立チャネル数で合議）:
+- **候補生成（チャネル）**: マスク辞書 ∪ 連絡先の正規表現（常時）∪ Sudachi 品詞 ∪ NER 2 モデル（NER 実行時）
+  ∪ LLM（pii-masker。実行時）。**走ったチャネルだけを集約**します（GiNZA は NER 検出を実行したときだけ）。
+- **確信度**（解決カテゴリへ投票した独立チャネル数で合議）:
   - **確定** … 実辞書（名簿）一致のみ。自動マスク。
   - **強** … 2 チャネル一致／昇格／連絡先の正規表現一致。自動マスク。
-  - **中** … 単独チャネル。要レビュー。
+  - **中** … 単独チャネル（LLM 単独など）。要レビュー。
   - **弱** … 地名・その他。要レビュー。
   - **微弱** … コードらしき誤検出（`Em_NoYes` / `~C02` / `7-410` / 漢字以外の 1 文字 など）。既定で非表示。
+    ただし **LLM が識別子（社員番号/アカウント/IP）と判定したものは免除**（弱で残す＝レビュー可視）。
   - **除外** … 除外リスト一致。既定で非表示。
 - **自動マスク対象は 確定／強**。中・弱はレビュー、微弱・除外は確信度フィルタで既定非表示。
+- **LLM は「文脈を読む 1 票」**として合流します（単独→中＝レビュー／NER と相乗り→強）。
+  確定は名簿のみで、LLM 単独で自動マスクはしません（過剰マスク回避）。
 - マスクは原文へ当て、表記ゆれは同じ伏せ字に寄せます。
 
 ---
@@ -160,19 +210,25 @@ uv run data-redactor check
 ```
 src/
   masking/             ← マスキングエンジン（UI 非依存）
-    engine.py            MaskingEngine（候補生成→確信度→マスク適用）
+    engine.py            MaskingEngine（候補生成→確信度→マスク適用。analyze(run_ner=...) で NER 任意）
     dictionary.py        MaskDictionary（社名・商標・人名の名簿）
     allowlist.py         MaskAllowlist（除外リスト）
-    cache.py             NerCache（NER 層キャッシュ・文書インデックス／SQLite）
+    cache.py             NerCache（NER 層 + LLM 検出層キャッシュ・文書インデックス／SQLite）
   ner/                 ← NER エンジン（UI 非依存）
-    engine.py            NerEngine / Entity / ExtractionResult
-    preprocess.py        テーブル平文化（検出用）
+    engine.py            NerEngine / sudachi_analyze_chunks（GiNZA 抜きの軽量トークナイズ）
+    preprocess.py        テーブル平文化＋ build_body（spaCy 非依存の本文/オフセット構築）
     rendering.py         displaCy の色マップ・HTML 生成
+  llm/                 ← LLM 検出アダプタ（pii-masker を呼ぶ薄い層。任意）
+    detect_layer.py      Stage A: 窓化→pii_masker.detect/locate_all→全文スパン／cached_detect
+    windows.py           本文を ~6-8k トークン窓に分割
+    schema.py            LlmSpan / LlmDetection（(de)シリアライズ）
+    _paths.py            external/pii-masker/src を sys.path へ（submodule path-injection）
   sources/             ← 入力アダプタ（チャンクのリストを返す）
     files.py             ファイル → チャンク（DocumentLoader + Splitter）
     kb_mcp.py            kb-mcp からの取得（分割済みチャンクをそのまま使う）
   core/document/       ← テキスト変換＋チャンク分割（kb-mcp から移植）
   config.py            ← ChunkingConfig（チャンクサイズ設定）
+external/pii-masker/   ← git submodule（LLM 検出の本体。コピーせず参照）
 main.py / app.py       ← 薄い表示層（CLI シム / Streamlit UI）
 ```
 
