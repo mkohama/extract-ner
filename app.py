@@ -184,12 +184,10 @@ def _select_table_fragment(
 def _cache_picker_fragment(docs: list) -> None:
     """🗂 キャッシュ選択の UI 一式（テーブル＋選択依存の操作）を 1 つの fragment にまとめる。
 
-    行クリック・チェック操作は **この fragment だけ** 再実行され、画面全体は再描画しない。
-    **選択依存のウィジェット（強制再解析チェック・案内）も fragment の中に置く**：外に出すと
-    行クリックでは外側が再実行されず「消えた」ように見えるため（実際にそのバグを踏んだ）。
-    選択した content_hash を ``st.session_state["cache_sel"]`` に、強制再解析の値はチェックの
-    キー ``cache_force_reanalyze`` に入る（``render_input`` が両方を読んで get_chunks を作る）。
+    行クリックは **この fragment だけ** 再実行され、画面全体は再描画しない。
+    選択した content_hash を ``st.session_state["cache_sel"]`` に入れる（``render_input`` が読む）。
     ``docs`` は呼び出し側がソース名で安定ソート済み（並び替えで取り違えない）。
+    NER のやり直し（キャッシュ無視）は読み込み時でなく **🔍 NER検出 タブ**で行う（パイプライン化に伴う移設）。
     """
     df = pd.DataFrame(
         [
@@ -227,16 +225,9 @@ def _cache_picker_fragment(docs: list) -> None:
             "一度ふつうに解析し直すと、以降ここから選べます。"
         )
         return
-    force = st.checkbox(
-        "🔄 NER をやり直す（キャッシュを無視して再解析）",
-        key="cache_force_reanalyze",
-        help="前処理やモデルの改善を反映したいときに。保存済みの NER 結果だけを破棄して"
-        "解析し直します（チャンク本文は残るので文書の選択はそのまま）。",
-    )
     st.caption(
-        "保存チャンクで再解析します。NER はキャッシュにヒットして高速"
-        "（辞書・除外リストの変更は反映されます）。"
-        + ("　⚠ チェック中：[🔍 解析する] で NER を再実行します。" if force else "")
+        "保存チャンクを入力に使います。[📥 読み込む] 後、各タブ（NER検出 / LLM検出 / マージ&確信度）で実行します。"
+        "NER のやり直し（キャッシュ無視）は NER検出 タブのチェックで行えます。"
     )
 
 
@@ -367,13 +358,10 @@ def render_input(
         cached_chunks = _ner_cache().get_chunks(d.content_hash)
         if not cached_chunks:  # 警告は fragment 内で表示済み（古いエントリ）
             return None, "cache", d.source_name, None
-        force = bool(st.session_state.get("cache_force_reanalyze", False))
 
-        def get_cache_chunks(c=cached_chunks, h=d.content_hash, f=force) -> list[str]:
-            # 強制再解析時は古い NER 層だけ破棄し、解析時に作り直させる（前処理変更の反映等）。
-            # 文書メタ・チャンクは残るので、この文書は引き続きここから選べる。
-            if f:
-                _ner_cache().delete_ner(h)
+        # 読み込みは保存チャンクを返すだけ（NER は回さない）。NER のやり直し（キャッシュ無視）は
+        # NER検出 タブのチェックで delete_ner する（パイプライン化に伴い読み込み時の強制再解析は廃止）。
+        def get_cache_chunks(c=cached_chunks) -> list[str]:
             return c
 
         return (("cache", d.content_hash), "cache", d.source_name, get_cache_chunks)
@@ -1253,12 +1241,21 @@ def _render_state_header(stored: dict) -> None:
 
 
 def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
-    """NER検出タブ（独立経路）：▶ で GiNZA 解析を実行し、NER 由来候補のビューを出す（LLM は含めない）。"""
-    if "ner" not in stored:
-        st.info(
-            "『▶ NER 解析を実行』で GiNZA（2モデル＋辞書）による解析を行います（LLM は含みません）。"
-        )
-        if st.button("▶ NER 解析を実行", type="primary", key="run_ner"):
+    """NER検出タブ（独立経路）：▶ で GiNZA 解析を実行/再実行し、NER 由来候補のビューを出す。"""
+    has = "ner" in stored
+    force = st.checkbox(
+        "🔄 キャッシュを無視して再解析",
+        key="ner_force",
+        help="前処理やモデルの改善を反映したいとき。保存済み NER 結果を破棄して解析し直します。",
+    )
+    if st.button(
+        "▶ NER 解析を再実行" if has else "▶ NER 解析を実行",
+        type="primary",
+        key="run_ner",
+    ):
+        if force:
+            _ner_cache().delete_ner(content_hash(stored["chunks"]))
+        with st.spinner("GiNZA で解析中 ..."):
             stored["ner"] = analyze_masking(
                 stored["chunks"],
                 stored["models"],
@@ -1266,11 +1263,15 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
                 stored["dict_path"],
                 stored["allowlist_path"],
             )
-            # マージは NER 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
-            stored.pop("analysis", None)
-            stored.pop("mask_sel", None)
-            stored.pop("_draft_saved", None)
-            st.rerun()
+        # マージは NER 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
+        stored.pop("analysis", None)
+        stored.pop("mask_sel", None)
+        stored.pop("_draft_saved", None)
+
+    if "ner" not in stored:
+        st.info(
+            "『▶ NER 解析を実行』で GiNZA（2モデル＋辞書）による解析を行います（LLM は含みません）。"
+        )
         return
 
     analysis = stored["ner"]
@@ -1332,7 +1333,6 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
             st.success(
                 f"LLM 検出 {len(detection.spans)} 件。マージ&確信度タブで合流できます。"
             )
-            st.rerun()
 
     llm = stored.get("llm")
     if not llm:
@@ -1359,18 +1359,21 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
             chans.append("NER(GiNZA)")
         if has_llm:
             chans.append("LLM")
-        st.info(
-            f"『▶ マージ&確信度を実行』で **{' ＋ '.join(chans)}** の票を集約し確信度づけします。\n\n"
-            "・**走ったチャネルだけ**合流します（NER は『🔍 NER検出』、LLM は『🤖 LLM検出』タブで実行）。\n"
-            "・辞書＋正規表現は常時。確信度＝投票チャネル数（単独→中／2チャネル→強／辞書→確定／regex→強）。\n"
-            + (
-                "・**GiNZA は未実行＝軽い**（辞書のため Sudachi のみ内部で動作）。"
-                if not run_ner
-                else "・NER 実行済み＝GiNZA 票も合流（NER 層はキャッシュ）。"
+        clicked = st.button("▶ マージ&確信度を実行", type="primary", key="run_merge")
+        if not clicked:
+            st.info(
+                f"『▶ マージ&確信度を実行』で **{' ＋ '.join(chans)}** の票を集約し確信度づけします。\n\n"
+                "・**走ったチャネルだけ**合流します（NER は『🔍 NER検出』、LLM は『🤖 LLM検出』タブで実行）。\n"
+                "・辞書＋正規表現は常時。確信度＝投票チャネル数（単独→中／2チャネル→強／辞書→確定／regex→強）。\n"
+                + (
+                    "・**GiNZA は未実行＝軽い**（辞書のため Sudachi のみ内部で動作）。"
+                    if not run_ner
+                    else "・NER 実行済み＝GiNZA 票も合流（NER 層はキャッシュ）。"
+                )
             )
-        )
-        if st.button("▶ マージ&確信度を実行", type="primary", key="run_merge"):
-            det = (stored.get("llm") or {}).get("detection")
+            return
+        det = (stored.get("llm") or {}).get("detection")
+        with st.spinner("候補を集約・確信度づけ中 ..."):
             stored["analysis"] = analyze_masking(
                 stored["chunks"],
                 stored["models"],
@@ -1380,11 +1383,9 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
                 llm_detection=det,
                 run_ner=run_ner,
             )
-            stored.pop("mask_sel", None)
-            stored.pop("_draft_saved", None)
-            stored["mask_ver"] = 0
-            st.rerun()
-        return
+        stored.pop("mask_sel", None)
+        stored.pop("_draft_saved", None)
+        stored["mask_ver"] = 0
     st.caption(
         "合流したチャネル: 辞書＋正規表現"
         + ("＋NER" if run_ner else "")
@@ -1395,21 +1396,28 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_pipeline(stored: dict, flatten_tables: bool) -> None:
-    """1ソース＝1パイプライン：状態ヘッダー＋各ステージのタブ（§12）。
+    """1ソース＝1パイプライン：状態ヘッダー＋ステージ選択（§12）。
 
-    各タブが独立した実行ボタンを持つ：NER検出/LLM検出 は対等な独立経路、マージ&確信度 が合流。
+    ステージは **st.radio（key で選択状態を保持）** で切り替える。`st.tabs` は各ステージの実行ボタンや
+    マスク反映が起こす rerun のたびに先頭タブへ戻ってしまうため使わない（選択が保持できる radio にする）。
+    NER検出/LLM検出 は対等な独立経路、マージ&確信度 が合流。
     """
     _render_state_header(stored)
-    tab_plain, tab_ner, tab_llm, tab_merge = st.tabs(
-        ["📄 平文", "🔍 NER検出", "🤖 LLM検出", "🔒 マージ&確信度"]
+    stage = st.radio(
+        "ステージ",
+        ["📄 平文", "🔍 NER検出", "🤖 LLM検出", "🔒 マージ&確信度"],
+        horizontal=True,
+        key="pipeline_stage",
+        label_visibility="collapsed",
     )
-    with tab_plain:
+    st.divider()
+    if stage.startswith("📄"):
         _render_extracted_text(stored["chunks"])
-    with tab_ner:
+    elif stage.startswith("🔍"):
         _render_ner_tab(stored, flatten_tables)
-    with tab_llm:
+    elif stage.startswith("🤖"):
         _render_llm_tab(stored, flatten_tables)
-    with tab_merge:
+    else:
         _render_merge_tab(stored, flatten_tables)
 
 
