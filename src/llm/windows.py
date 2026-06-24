@@ -17,8 +17,9 @@ from src.ner.preprocess import CHUNK_SEPARATOR
 # これはコミット済みのベースライン。実運用の上書きは app.py 側で env（LLM_WINDOW_MAX_TOKENS /
 # LLM_WINDOW_OVERLAP_TOKENS）から行い、値は detector_version の win… に自動反映される（windows.py は純粋に保つ）。
 DEFAULT_MAX_TOKENS = 7000
-# 窓間の小 overlap（境界で文脈/実体が切れるのを緩和。重複検出は detect_layer の解決で潰れる）。
-DEFAULT_OVERLAP_TOKENS = 200
+# 窓間 overlap（境界で先行文脈が切れるのを緩和。重複検出は detect_layer の解決で潰れる）。**既定 0＝重なり無し**
+# （窓化は CHUNK_SEPARATOR 境界で割るので実体は文字単位に切れない。継ぎ目の先行文脈が要るなら 100〜200 へ）。
+DEFAULT_OVERLAP_TOKENS = 0
 
 
 def _segments(text: str) -> list[tuple[int, int, int]]:

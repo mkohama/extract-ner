@@ -72,7 +72,7 @@ LLM 検出キャッシュは `(content_hash, model, flatten, detector_version)` 
 **検出結果に影響する設定を変えたら detector_version を変える**——こうするとキャッシュが不一致になり自動で
 再検出されます（変え忘れると古い結果が使い回される＝最大の落とし穴）。
 
-detector_version（例 `pii-masker@9d9942e|win7000ov200`）は **2 つの版**を `|` 区切りで持ち、
+detector_version（例 `pii-masker@9d9942e|win7000ov0`）は **2 つの版**を `|` 区切りで持ち、
 `app.py` の `_detector_version()` が合成します。**変える契機も方法もそれぞれ別**です:
 
 | 部分 | 変える契機 | 方法 |
@@ -96,7 +96,7 @@ LLM に本文を渡す前の「窓」分割の大きさは **`.env` の環境変
 | 環境変数 | 既定 | 意味 |
 |---|---|---|
 | `LLM_WINDOW_MAX_TOKENS` | 7000 | 1 窓の上限トークン数（小さいほど窓が増え API 回数↑だが mini の長文取りこぼしは減る） |
-| `LLM_WINDOW_OVERLAP_TOKENS` | 200 | 窓間の重なり（境界で実体が切れる取りこぼしを緩和） |
+| `LLM_WINDOW_OVERLAP_TOKENS` | 0 | 窓間の重なり（**0=重なり無し**。窓の継ぎ目で先行文脈を次窓へ持ち越したいなら 100〜200。窓化は段落境界で割るので実体は切れない） |
 
 値を変えると detector_version の `win…` が自動で変わり、**LLM 検出キャッシュが自動で無効化＝再検出**されます。
 値を元に戻せば元のキャッシュに再びヒットします。既定（`src/llm/windows.py` の `DEFAULT_MAX_TOKENS` /
