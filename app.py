@@ -659,10 +659,7 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
     cap = "チェックは**全出現が選択されているときだけ ON**。チェックした実体は文書内の全出現がマスクされます。"
     if hidden:
         cap += f"（確信度フィルタで {hidden} 実体を非表示）"
-    cap += (
-        "　※`選択状況` が **⚠一部** の語は、出現ごとビューで一部だけマスクしています"
-        "（実体全体ではない）。選択は両ビュー共有（切替で消えません）。"
-    )
+    cap += "　※`選択状況` が **⚠一部** の語は、出現ごとビューで一部だけ選択中です。"
     st.caption(cap)
     rows = []
     for g in groups:
@@ -691,10 +688,7 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
             }
         )
     table = pd.DataFrame(rows)
-    st.caption(
-        "チェックしてから **[✅ マスクを反映]** を押すと結果に反映されます"
-        "（チェック中は再描画しません＝画面が先頭に飛びません）。"
-    )
+    st.caption("チェックしてから **[✅ マスクを反映]** を押すと反映されます。")
     # st.form で囲む：チェックのたびに再実行せず、ボタン押下時だけまとめて適用する
     # （data_editor は編集ごとに rerun し画面が先頭へ飛ぶため。フォームで抑止）。
     # data_editor の鍵に ver を含める＝共有選択 sel が変わったら貼り直し、古い編集状態を残さない。
@@ -753,10 +747,7 @@ def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
     )
     if hidden:
         cap += f"（確信度フィルタで {hidden} 出現を非表示）"
-    cap += (
-        " チェックしてから **[✅ マスクを反映]** を押すと反映されます"
-        "（チェック中は再描画しません）。※選択は実体ごとビューと共有（切替で消えません）。"
-    )
+    cap += " チェックしてから **[✅ マスクを反映]** を押すと反映されます。"
     st.caption(cap)
     table = pd.DataFrame(
         [
@@ -1363,19 +1354,16 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
 
     if in_session:
         st.caption("NER 状態: ✅ 実行済み（このセッション）")
-        if st.button(
-            "🔄 再実行（キャッシュ無視・GiNZA で時間がかかります）", key="ner_rerun"
-        ):
+        if st.button("🔄 再実行（キャッシュ無視）", key="ner_rerun"):
             _run(force=True)
     elif ner_cached:
         st.caption(
             f"NER 状態: 📂 キャッシュ済み（{_short_models(tuple(sorted(cached_models)))}）"
-            "＝表示は一瞬（GiNZA 再実行なし）"
         )
         c1, c2 = st.columns(2)
         if c1.button("📂 キャッシュの結果を表示", type="primary", key="ner_show"):
             _run(force=False)
-        if c2.button("🔄 再実行（キャッシュ無視・重い）", key="ner_rerun"):
+        if c2.button("🔄 再実行（キャッシュ無視）", key="ner_rerun"):
             _run(force=True)
     else:
         extra = (
@@ -1383,9 +1371,7 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
             if cached_models
             else ""
         )
-        st.caption(
-            f"NER 状態: ⬜ 未解析{extra}。実行は GiNZA（2モデル）で時間がかかります"
-        )
+        st.caption(f"NER 状態: ⬜ 未解析{extra}（GiNZA・重い）")
         if st.button("▶ NER 解析を実行", type="primary", key="ner_run"):
             _run(force=False)
 
@@ -1476,21 +1462,17 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
 
     if in_session:
         st.caption("LLM 状態: ✅ 実行済み（このセッション）")
-        if st.button(
-            "🔄 LLM を再実行（キャッシュ無視・Azure 呼び出し）", key="llm_rerun"
-        ):
+        if st.button("🔄 再実行（キャッシュ無視）", key="llm_rerun"):
             _run(force=True)
     elif llm_cached:
-        st.caption("LLM 状態: 📂 キャッシュ済み＝表示は一瞬（Azure 呼び出しなし）")
+        st.caption("LLM 状態: 📂 キャッシュ済み")
         c1, c2 = st.columns(2)
         if c1.button("📂 キャッシュの結果を表示", type="primary", key="llm_show"):
             _run(force=False)
-        if c2.button("🔄 再実行（キャッシュ無視・Azure 呼び出し）", key="llm_rerun"):
+        if c2.button("🔄 再実行（キャッシュ無視）", key="llm_rerun"):
             _run(force=True)
     else:
-        st.caption(
-            f"LLM 状態: ⬜ 未実行。実行は {LLM_MODEL}（Azure）呼び出しで時間がかかります（要 `az login`）"
-        )
+        st.caption(f"LLM 状態: ⬜ 未実行（{LLM_MODEL} / Azure・要 `az login`）")
         if st.button("▶ LLM 検出を実行", type="primary", key="llm_run"):
             _run(force=False)
 
@@ -1499,11 +1481,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
         return
     if llm.get("elapsed") is not None:
         n = len(llm["detection"].spans)
-        st.success(
-            f"⏱ LLM 検出 {llm['elapsed']:.1f}s（{n} 件）"
-            "　※2 回目以降はキャッシュで一瞬（やり直しは上のチェック）。",
-            icon="✅",
-        )
+        st.success(f"⏱ LLM 検出 {llm['elapsed']:.1f}s（{n} 件）", icon="✅")
     render_llm_result(llm["body_text"], llm["detection"])
 
 
@@ -1541,24 +1519,25 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
             chans.append(f"NER（{_src(ner_in_session)}）")
         if has_llm:
             chans.append(f"LLM（{_src(llm_in_session)}）")
-        # 「今どういう状況か」「押すと何が合流するか」を明示する（案A：迷子防止）。
-        if run_ner or has_llm:
-            note = (
-                "・NER / LLM は **実行済み or キャッシュ済み** のチャネルを自動で合流します"
-                "（キャッシュ参照のみ＝GiNZA / Azure の**再実行はしません**＝一瞬）。\n\n"
-            )
-        else:
-            note = (
-                "・NER も LLM も **未実行・未キャッシュ** です。今は **辞書＋正規表現のみ** で集約します"
-                "（NER は『🔍 NER検出』、LLM は『🤖 LLM検出』タブで一度実行すると、以降ここに自動合流）。\n\n"
-            )
+        # キャッシュも実行結果も無いチャネル＝そのままでは合流できない。各タブでの実行を促す。
+        missing = []
+        if not run_ner:
+            missing.append("NER（🔍 NER検出 タブ）")
+        if not has_llm:
+            missing.append("LLM（🤖 LLM検出 タブ）")
         clicked = st.button("▶ マージ&確信度を実行", type="primary", key="run_merge")
         if not clicked:
-            st.info(
-                f"『▶ マージ&確信度を実行』で **{' ＋ '.join(chans)}** の票を集約し確信度づけします。\n\n"
-                + note
-                + "・辞書＋正規表現は常時。確信度＝投票チャネル数（単独→中／2チャネル→強／辞書→確定／regex→強）。"
+            msg = f"『▶ マージ&確信度を実行』で **{' ＋ '.join(chans)}** の票を集約し確信度づけします。"
+            if missing:
+                msg += (
+                    "\n\n" + "・".join(missing) + " はまだ結果がありません。"
+                    "合流したい場合は各タブで実行してください（実行後は自動で合流します）。"
+                )
+            msg += (
+                "\n\n確信度：単一チャネル→中／2チャネル以上→強／辞書→確定／"
+                "正規表現パターン→強／地名・その他→弱（票数によらず）。"
             )
+            st.info(msg)
             return
         # LLM 検出を用意：セッション優先、無ければキャッシュから読む（ヒット＝Azure を呼ばない）。
         det = (stored.get("llm") or {}).get("detection")
