@@ -66,17 +66,36 @@ pii-masker 側にあり、data-redactor は薄いアダプタ（[src/llm/](src/l
 > このリポジトリ側（開発機）でも仕組みの動作確認はできますが、Azure 実呼び出しには `az login` と
 > `RESOURCE_NAME_GPT41_MINI` が必要です。
 
+#### detector_version の運用ルール（キャッシュ無効化）
+
+LLM 検出キャッシュは `(content_hash, model, flatten, detector_version)` をキーにします。
+**検出結果に影響する設定を変えたら、`app.py` の `_DETECTOR_VERSION` の対応する部分を上げる**——
+こうするとキャッシュが不一致になり自動で再検出されます（上げ忘れると古い結果が使い回される＝最大の落とし穴）。
+
+`_DETECTOR_VERSION`（例 `pii-masker@9d9942e|win7000ov200|ene-v1`）は **独立した 3 つの版**を持ち、
+**上げる契機もそれぞれ別**です:
+
+| 部分 | 上げる契機 | 担当 |
+|---|---|---|
+| `pii-masker@<hash>` | pii-masker（submodule）を更新したとき | `sync-pii-masker` が自動 |
+| `ene-vN` | `src/masking/engine.py` の `_ENE_TO_CATEGORY`（ENE type→カテゴリ）を変えたとき | 手動 |
+| `win…` | 窓ポリシー（`src/llm/windows.py` の `DEFAULT_MAX_TOKENS` / `DEFAULT_OVERLAP_TOKENS`）を変えたとき | 手動・**pii-masker とは無関係** |
+
+> `win…`・`ene-vN` は pii-masker の更新有無に関係なく、**こちらが windows.py / engine.py を編集したとき**に
+> その場で上げる作業です（下の pii-masker 追従手順とは別物）。逆に pii-masker を更新しても windows.py を
+> 触っていなければ `win…` は変えません。
+
 #### pii-masker が更新されたら（追従手順）
 
-pii-masker（submodule）が更新されたら、それを取り込み、LLM 検出キャッシュを正しく無効化する必要が
-あります。機械的な部分は **`sync-pii-masker` サブコマンド**が自動化します。
+pii-masker（submodule）を更新するときの手順。それを取り込み、LLM 検出キャッシュを正しく無効化します。
+機械的な部分は **`sync-pii-masker` サブコマンド**が自動化します。
 
 ```powershell
 # 追跡ブランチの最新へ（特定のコミット/タグにするなら: data-redactor sync-pii-masker <ref>）
 uv run data-redactor sync-pii-masker
 ```
 
-これが自動でやること:
+自動で実行されること:
 
 1. submodule のポインタを更新（`<ref>` 省略時は追跡ブランチの最新）
 2. 新 HEAD の短縮ハッシュを取得
@@ -92,10 +111,12 @@ uv run data-redactor sync-pii-masker
 自動化できない（**人手で確認してからコミット**する）部分:
 
 - インターフェース契約の変更（`detect` / `locate_all` の戻り値）→ [src/llm/](src/llm/) のアダプタを修正
-- 新しい ENE type → `_ENE_TO_CATEGORY` に追加し、`_DETECTOR_VERSION` の `ene-vN` を上げる
-- 窓ポリシーを変えたら `_DETECTOR_VERSION` の `win…` を更新
+- 新しい ENE type が増えていたら → `_ENE_TO_CATEGORY` に追加し、`ene-vN` を上げる（上の運用ルール）
 - 実機（`az login` 済み）で 🤖 LLM検出 を回して件数/カテゴリを目視
 - 問題なければ `git commit`
+
+> 窓ポリシー（`win…`）は pii-masker 更新では通常触りません。変えるのは windows.py を編集したときで、
+> その手順は上の「detector_version の運用ルール」を参照。
 
 > `--no-update`（更新せず現在の HEAD で検査・検証だけ）、`--skip-tests`（ruff/mypy/pytest を省略）も使えます。
 
