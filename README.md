@@ -66,6 +66,39 @@ pii-masker 側にあり、data-redactor は薄いアダプタ（[src/llm/](src/l
 > このリポジトリ側（開発機）でも仕組みの動作確認はできますが、Azure 実呼び出しには `az login` と
 > `RESOURCE_NAME_GPT41_MINI` が必要です。
 
+#### pii-masker が更新されたら（追従手順）
+
+pii-masker（submodule）が更新されたら、それを取り込み、LLM 検出キャッシュを正しく無効化する必要が
+あります。機械的な部分は **`sync-pii-masker` サブコマンド**が自動化します。
+
+```powershell
+# 追跡ブランチの最新へ（特定のコミット/タグにするなら: data-redactor sync-pii-masker <ref>）
+uv run data-redactor sync-pii-masker
+```
+
+これが自動でやること:
+
+1. submodule のポインタを更新（`<ref>` 省略時は追跡ブランチの最新）
+2. 新 HEAD の短縮ハッシュを取得
+3. `app.py` の `_DETECTOR_VERSION` の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュが
+   `(content_hash, model, flatten, detector_version)` 不一致で**自動ミス→再取得**になる。ここを忘れると
+   検出器が変わっても古いキャッシュが使い回される＝最大の落とし穴）
+4. **ENE type ドリフト検査**（pii-masker のプロンプトの型 vs `src/masking/engine.py` の
+   `_ENE_TO_CATEGORY`）。マップに無い新 type は「その他」に落ちて recall 漏れになるため警告する
+5. submodule の変更点（`detector_llm.py` / `schema.py` / `locate.py` 等）を表示
+6. `external/pii-masker` と `app.py` を **stage**（コミットはしない）
+7. `ruff` / `mypy` / `pytest` を実行
+
+自動化できない（**人手で確認してからコミット**する）部分:
+
+- インターフェース契約の変更（`detect` / `locate_all` の戻り値）→ [src/llm/](src/llm/) のアダプタを修正
+- 新しい ENE type → `_ENE_TO_CATEGORY` に追加し、`_DETECTOR_VERSION` の `ene-vN` を上げる
+- 窓ポリシーを変えたら `_DETECTOR_VERSION` の `win…` を更新
+- 実機（`az login` 済み）で 🤖 LLM検出 を回して件数/カテゴリを目視
+- 問題なければ `git commit`
+
+> `--no-update`（更新せず現在の HEAD で検査・検証だけ）、`--skip-tests`（ruff/mypy/pytest を省略）も使えます。
+
 ---
 
 ## Web UI（Streamlit）

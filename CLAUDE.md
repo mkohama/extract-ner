@@ -27,6 +27,9 @@ data-redactor — GiNZA (spaCy) による日本語固有表現抽出（NER）ツ
   - `uv run data-redactor debug <file> [--both-models/--all-tokens/--flatten/--out]` …
     各トークンの SudachiPy 品詞 / NER ラベルを並べて recall の穴を観察
   - `uv run data-redactor check` … 品質ゲート（ruff + mypy）をまとめて実行
+  - `uv run data-redactor sync-pii-masker [ref]` … pii-masker（submodule）更新への追従を自動化
+    （submodule 更新 → `app.py` の `_DETECTOR_VERSION` のハッシュ書換 → ENE type ドリフト検査 →
+    ruff/mypy/pytest。**stage のみ・コミットはしない**。詳細は README「pii-masker が更新されたら」）。
   - `main.py` は後方互換シム（`uv run main.py <サブコマンド>` でも同じ）。
   - エントリポイント登録には `pyproject.toml` の `[build-system]`（hatchling, `packages=["src"]`）と
     `[project.scripts]` が必要。追加後は `uv sync` で再インストールするとコマンドが有効になる。

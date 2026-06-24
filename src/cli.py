@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import webbrowser
@@ -45,6 +46,10 @@ from src.sources import SAMPLE_TEXT, load_chunks_from_file
 _ROOT = Path(__file__).resolve().parent.parent
 # マスク辞書の既定パス
 _DEFAULT_DICT = _ROOT / "data" / "mask_dict.yaml"
+# pii-masker（submodule）追従に使う場所。detector_version は app.py に焼き込まれている。
+_SUBMODULE = _ROOT / "external" / "pii-masker"
+_APP_PY = _ROOT / "app.py"
+_DETECTOR_HASH_RE = re.compile(r"pii-masker@([0-9a-fA-F]+)")
 
 
 def _ensure_utf8_stdout() -> None:
@@ -509,6 +514,169 @@ def check() -> None:
     click.echo("\n$ mypy " + " ".join(targets))
     rc_mypy = subprocess.call(["mypy", *targets], cwd=_ROOT)
     raise SystemExit(rc_ruff or rc_mypy)
+
+
+def _git_out(args: list[str], cwd: Path) -> str:
+    """git をサブプロセスで実行し標準出力（strip 済み）を返す。失敗時は CalledProcessError。"""
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _pii_masker_ene_types(sub: Path) -> set[str] | None:
+    """pii-masker の検出プロンプトから ENE type 名の集合を抽出する（取れなければ None）。
+
+    型は ``detector_llm.py`` の ``DETECTION_INSTRUCTION`` 内に人手で列挙されている。
+    「…選ぶ:」～「出力は…」の範囲で、各型名は全角 ``（`` の直前に置かれる
+    （例 ``Person（人名…）`` ``Province（都道府県） / City（市区町村）``）ので、そこだけ拾う。
+    説明文中の語（``…などのID`` ``IPアドレス`` 等）を型名と誤認しないための限定。
+    プロンプト書式が大きく変わると None を返す（その場合は手動確認を促す）。
+    """
+    detector = sub / "src" / "pii_masker" / "detector_llm.py"
+    if not detector.exists():
+        return None
+    block = re.search(r"選ぶ:(.*?)出力は", detector.read_text(encoding="utf-8"), re.S)
+    if not block:
+        return None
+    return set(re.findall(r"([A-Z][A-Za-z_]+)\s*（", block.group(1)))
+
+
+@cli.command(name="sync-pii-masker")
+@click.argument("ref", required=False)
+@click.option(
+    "--no-update",
+    is_flag=True,
+    help="submodule を更新せず、現在の HEAD で検証だけ行う。",
+)
+@click.option(
+    "--skip-tests", is_flag=True, help="ruff/mypy/pytest をスキップする（速い確認用）。"
+)
+def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
+    """pii-masker（submodule）を更新し、detector_version の追従と検証をまとめて行う。
+
+    機械的な手順を自動化する：① submodule のポインタ更新（REF 省略時は追跡ブランチの最新／
+    REF 指定でそのコミット・タグへ）→ ② 新 HEAD の短縮ハッシュ取得 → ③ app.py の
+    _DETECTOR_VERSION の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュを自動ミスさせる）
+    → ④ ENE type ドリフト警告と submodule の変更点表示 → ⑤ ruff/mypy/pytest。
+
+    **コミットはしない**（submodule ポインタと app.py を stage するだけ）。インターフェース契約・
+    ENE マップ・ene-vN バンプ・実機 e2e（az login）は人手で確認してからコミットすること。
+    """
+    from src.masking.engine import _ENE_TO_CATEGORY
+
+    if not _SUBMODULE.is_dir():
+        raise SystemExit(
+            f"submodule が見つかりません: {_SUBMODULE}\n"
+            "先に `git submodule update --init` を実行してください。"
+        )
+
+    app_text = _APP_PY.read_text(encoding="utf-8")
+    m = _DETECTOR_HASH_RE.search(app_text)
+    old_hash = m.group(1) if m else None
+    click.echo(f"現在の detector_version ハッシュ: {old_hash or '（不明）'}")
+
+    # ① submodule 更新
+    try:
+        if no_update:
+            click.echo("--no-update: submodule は更新せず現在の HEAD で検証します。")
+        elif ref:
+            click.echo(f"submodule を {ref} に更新中 ...")
+            subprocess.check_call(["git", "fetch"], cwd=_SUBMODULE)
+            subprocess.check_call(["git", "checkout", ref], cwd=_SUBMODULE)
+        else:
+            click.echo("submodule を追跡ブランチの最新に更新中 ...")
+            subprocess.check_call(
+                ["git", "submodule", "update", "--remote", "external/pii-masker"],
+                cwd=_ROOT,
+            )
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"submodule の更新に失敗しました: {e}") from e
+
+    # ② 新ハッシュ
+    new_hash = _git_out(["rev-parse", "--short", "HEAD"], cwd=_SUBMODULE)
+    click.echo(f"pii-masker HEAD: {new_hash}")
+
+    # ③ detector_version の書き換え（ハッシュ部分のみ。win/ene-vN は人手）
+    if old_hash == new_hash:
+        click.echo("detector_version のハッシュは最新です（書き換え不要）。")
+    elif old_hash is None:
+        click.echo(
+            "⚠ app.py に pii-masker@<hash> が見つからず書き換えできませんでした。手動で確認してください。"
+        )
+    else:
+        app_text = _DETECTOR_HASH_RE.sub(f"pii-masker@{new_hash}", app_text, count=1)
+        _APP_PY.write_text(app_text, encoding="utf-8")
+        click.echo(
+            f"app.py の detector_version を pii-masker@{old_hash} → pii-masker@{new_hash} "
+            "に書き換えました（LLM キャッシュが自動ミス→再取得になります）。"
+        )
+
+    # ④-a submodule の変更点（契約 / プロンプトを目視するための手がかり）
+    if old_hash and old_hash != new_hash:
+        click.echo("\n===== pii-masker の変更（要目視：契約 / プロンプト） =====")
+        try:
+            stat = _git_out(["diff", "--stat", f"{old_hash}..HEAD"], cwd=_SUBMODULE)
+            click.echo(stat or "（差分なし）")
+        except subprocess.CalledProcessError:
+            click.echo(f"（{old_hash}..HEAD の差分を取得できませんでした）")
+        click.echo(
+            "→ detector_llm.py（プロンプト/型）・schema.py・locate.py の変更は "
+            "src/llm のアダプタ契約（detect/locate_all の戻り値）に影響します。"
+        )
+
+    # ④-b ENE type ドリフト（プロンプトの型 vs _ENE_TO_CATEGORY）
+    types = _pii_masker_ene_types(_SUBMODULE)
+    click.echo("\n===== ENE type ドリフト検査 =====")
+    if types is None:
+        click.echo(
+            "⚠ プロンプトから type 一覧を抽出できませんでした。detector_llm.py を手動確認してください。"
+        )
+    else:
+        mapped = set(_ENE_TO_CATEGORY)
+        unmapped = sorted(types - mapped)
+        extra = sorted(mapped - types)
+        if unmapped:
+            click.echo(
+                "⚠ マップに無い ENE type（『その他』に落ちる＝recall 漏れの恐れ）: "
+                + ", ".join(unmapped)
+                + "\n  → src/masking/engine.py の _ENE_TO_CATEGORY に追加し、"
+                "_DETECTOR_VERSION の ene-vN を上げてください。"
+            )
+        else:
+            click.echo("マップ漏れの新 type はありません。")
+        if extra:
+            click.echo(
+                "・マップにあるがプロンプトに無い type（先取り/廃止の可能性。多くは無害）: "
+                + ", ".join(extra)
+            )
+
+    # ⑤ stage（コミットはしない）
+    subprocess.call(["git", "add", "external/pii-masker", "app.py"], cwd=_ROOT)
+    click.echo(
+        "\nstage しました（external/pii-masker, app.py）。コミットは目視確認後に手動で。"
+    )
+
+    # ⑥ 検証
+    if skip_tests:
+        click.echo("--skip-tests: ruff/mypy/pytest はスキップしました。")
+    else:
+        click.echo("\n===== 検証（ruff / mypy / pytest） =====")
+        targets = ["src", "main.py", "app.py"]
+        rc_ruff = subprocess.call(["ruff", "check", *targets], cwd=_ROOT)
+        rc_mypy = subprocess.call(["mypy", *targets], cwd=_ROOT)
+        rc_test = subprocess.call([sys.executable, "-m", "pytest", "-q"], cwd=_ROOT)
+        if rc_ruff or rc_mypy or rc_test:
+            click.echo("⚠ 検証で失敗があります。修正してからコミットしてください。")
+
+    # 残りの手動チェックリスト
+    click.echo(
+        "\n===== 残りの手動ステップ =====\n"
+        "1. 上の ENE ドリフト・submodule 差分を確認し、必要なら _ENE_TO_CATEGORY 更新＋ene-vN バンプ\n"
+        "2. 窓ポリシーを変えたなら _DETECTOR_VERSION の win… を更新\n"
+        "3. 実機（az login 済み）で 🤖 LLM検出 を回し件数/カテゴリを目視\n"
+        "4. docs-dev/insight-memo.md に日付つきで記録\n"
+        "5. 問題なければ git commit"
+    )
 
 
 def main() -> None:
