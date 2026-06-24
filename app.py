@@ -991,7 +991,9 @@ def analyze_masking(
 
 
 # detector_version: プロンプト（pii-masker 版）＋窓ポリシー＋type-map をまとめた版。
-# これを変えると LLM 検出キャッシュが自動ミス→再取得（§6）。
+# これを変えると LLM 検出キャッシュが自動ミス→再取得（§6）。書き換え方（README「detector_version の運用ルール」）:
+#   pii-masker@<hash>=submodule 更新で sync-pii-masker が自動 / ene-vN=type-map を変えたら数字を +1 /
+#   win…=窓ポリシー（windows.py）を変えたら実値を埋め込む（例 win6000ov400）。要は文字列が前回と変わればよい。
 _DETECTOR_VERSION = "pii-masker@9d9942e|win7000ov200|ene-v1"
 
 

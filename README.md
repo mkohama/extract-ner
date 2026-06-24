@@ -72,14 +72,18 @@ LLM 検出キャッシュは `(content_hash, model, flatten, detector_version)` 
 **検出結果に影響する設定を変えたら、`app.py` の `_DETECTOR_VERSION` の対応する部分を上げる**——
 こうするとキャッシュが不一致になり自動で再検出されます（上げ忘れると古い結果が使い回される＝最大の落とし穴）。
 
-`_DETECTOR_VERSION`（例 `pii-masker@9d9942e|win7000ov200|ene-v1`）は **独立した 3 つの版**を持ち、
-**上げる契機もそれぞれ別**です:
+`_DETECTOR_VERSION`（[app.py](app.py) 内・例 `pii-masker@9d9942e|win7000ov200|ene-v1`）は
+**独立した 3 つの版**を `|` 区切りで持つ手書き文字列で、**上げる契機も書き換え方もそれぞれ別**です:
 
-| 部分 | 上げる契機 | 担当 |
-|---|---|---|
-| `pii-masker@<hash>` | pii-masker（submodule）を更新したとき | `sync-pii-masker` が自動 |
-| `ene-vN` | `src/masking/engine.py` の `_ENE_TO_CATEGORY`（ENE type→カテゴリ）を変えたとき | 手動 |
-| `win…` | 窓ポリシー（`src/llm/windows.py` の `DEFAULT_MAX_TOKENS` / `DEFAULT_OVERLAP_TOKENS`）を変えたとき | 手動・**pii-masker とは無関係** |
+| 部分 | 上げる契機 | 書き換え方 | 担当 |
+|---|---|---|---|
+| `pii-masker@<hash>` | pii-masker（submodule）を更新したとき | 新しい短縮ハッシュに置換 | `sync-pii-masker` が自動 |
+| `ene-vN` | `src/masking/engine.py` の `_ENE_TO_CATEGORY`（ENE type→カテゴリ）を変えたとき | **数字を +1**（`ene-v1`→`ene-v2`→…） | 手動 |
+| `win…` | 窓ポリシー（`src/llm/windows.py` の `DEFAULT_MAX_TOKENS` / `DEFAULT_OVERLAP_TOKENS`）を変えたとき | **実値を埋め込む**（例 `win7000ov200`→`win6000ov400`） | 手動・**pii-masker とは無関係** |
+
+技術的に効いているのは「**文字列全体が前回と変わること**」だけ（変わればキャッシュキーが不一致になり再検出される）。
+`ene-vN` の連番や `win…` の実値埋め込みは、どの版で作られたキャッシュかを**人が追えるようにするための規約**で、
+意味を持つのは可読性だけです。手で編集するときは「変えたら必ずどこか上げる」を守れば OK。
 
 > `win…`・`ene-vN` は pii-masker の更新有無に関係なく、**こちらが windows.py / engine.py を編集したとき**に
 > その場で上げる作業です（下の pii-masker 追従手順とは別物）。逆に pii-masker を更新しても windows.py を
