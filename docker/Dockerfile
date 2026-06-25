@@ -11,8 +11,9 @@
 #     /app へ COPY し PYTHONPATH=/app で `import src` を解決する。これにより _paths.py の
 #     parents[2] が /app を指し、/app/external/pii-masker/src を sys.path に通せる。
 #   - ja_ginza_electra は初回 nlp ロードで torch＋ELECTRA 重みを DL する。ビルド時に prewarm
-#     してイメージに焼く（実行時ネット不要・recall 既定を担保）。HF_HOME を固定パスに置き、
-#     任意の実行 UID でも読めるよう a+rX を付ける。
+#     してイメージに焼く（実行時ネット不要・recall 既定を担保）。appuser で実行し重みを 644 で
+#     置くので、任意の実行 UID でも読める（再帰 chmod は不要・打つと venv が複製され肥大する）。
+#   - torch は CPU 版に入れ替える（builder 参照）。CUDA 版のままだと nvidia-* で 5-7GB 肥大する。
 # =============================================================================
 
 # グローバル ARG（各ステージで再宣言が必要）
@@ -32,6 +33,23 @@ WORKDIR /app
 # --extra は不要。app.py/main.py を wheel に含めないため --no-install-project（ソース直実行）。
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
+
+# torch を CPU 版に入れ替える（kb-mcp と同方式）。
+# Linux/x86_64 では lock の torch が CUDA 版で、nvidia-*/triton/cuda-* を 5-7GB 引き込む
+# （uv.lock の marker = linux & x86_64）。GiNZA electra は CPU 推論で十分・客先 PC に GPU 無し。
+#   - torch だけを CPU index の同一バージョン（2.10.0）で再インストール（--reinstall-package で
+#     依存は触らない＝既存の sympy/networkx 等をそのまま使い、CPU index に無い依存を取りに行かない）。
+#   - CPU 版 torch は nvidia-*/triton/cuda-* に依存しないので、孤立したそれらを物理削除する。
+# torch バージョンを上げたら（uv.lock 変更時）この `2.10.0` も合わせて更新すること。
+RUN uv pip install --reinstall-package torch --no-cache \
+        --index-url https://download.pytorch.org/whl/cpu torch==2.10.0 && \
+    rm -rf /app/.venv/lib/python*/site-packages/nvidia* \
+           /app/.venv/lib/python*/site-packages/triton* \
+           /app/.venv/lib/python*/site-packages/cuda* \
+           /app/.venv/lib/python*/site-packages/_cuda* \
+           /app/.venv/lib/python*/site-packages/*nvidia*.dist-info \
+           /app/.venv/lib/python*/site-packages/*triton*.dist-info \
+           /app/.venv/lib/python*/site-packages/*cuda*.dist-info
 
 # 不要なビルドアーティファクトを削除してイメージサイズを削減
 RUN find /app/.venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
