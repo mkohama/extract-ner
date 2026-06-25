@@ -193,6 +193,46 @@ UI で URL（既定 `http://localhost:8000/mcp`）を指定し、「文書リス
 
 ---
 
+## Docker で起動
+
+Streamlit UI をコンテナで動かします。`make` は `id -u` を使うため **Git Bash / WSL 等の POSIX シェル**から実行してください。
+
+```bash
+# 1) ビルド前提: submodule（pii-masker）を取得しておく（イメージに COPY されます）
+git submodule update --init
+
+# 2) .env を用意（LLM 経路を使う場合。.env.example をコピーして実値を入れる）
+#    RESOURCE_NAME_GPT41_MINI / DEFAULT_LLM_MODEL / KB_MCP_URL / LLM_WINDOW_* を設定
+cp .env.example .env
+
+# 3) 起動（ビルド＋デタッチ）。初回ビルドは torch＋ELECTRA 重みの DL で時間がかかります
+make docker-up        # → http://localhost:8501
+
+make docker-logs      # ログ追従
+make docker-down      # 停止・削除
+make clean            # コンテナ＋ボリュームごと削除
+```
+
+成果物: [docker/Dockerfile](docker/Dockerfile)・[.dockerignore](.dockerignore)・[compose.yaml](compose.yaml)・[Makefile](Makefile)。
+
+ポイント（data-redactor 固有）:
+
+- **Python 3.11 固定**（ja-ginza-electra の制約）。イメージは `python:3.11-slim`。
+- **`ja_ginza_electra` はビルド時に prewarm**（torch＋ELECTRA 重みをイメージに焼く）。実行時はネット不要・
+  recall 既定（electra）を担保。代償にイメージは数 GB。軽量運用に振るなら別途 `ja_ginza` 既定化を検討。
+- **pii-masker（submodule）は `external/pii-masker/src` を COPY** し、`PYTHONPATH=/app` の path-injection
+  （[src/llm/_paths.py](src/llm/_paths.py)）で `import pii_masker` を解決。`.dockerignore` で `external/` は除外しない。
+- **機密データ `./data` はボリュームマウント**（`cache.db` / `mask_dict.yaml` / `mask_allowlist.yaml`＝git 管理外）。
+  イメージには焼かない（`.dockerignore` で `data/` を除外）。
+- **kb-mcp** はコンテナに載せず `.env` の `KB_MCP_URL` で外部接続。ホスト側 kb-mcp に繋ぐなら
+  `localhost` ではなく `host.docker.internal` を使う（Linux は `compose.yaml` の `extra_hosts` を有効化）。
+- **Azure 認証**は Azure CLI 同梱。ホストの `az login` キャッシュを使うなら `compose.yaml` の
+  `~/.azure` マウントを有効化する。
+- `.dockerignore` は spec-summarizer の `docker/.dockerignore` と違い **リポジトリ直下**に置く
+  （build context が `.` のため Docker が確実に参照する位置）。
+
+---
+
 ## CLI
 
 統一コマンド `data-redactor`（実体は [src/cli.py](src/cli.py)。`uv run main.py <サブコマンド>` でも可）。

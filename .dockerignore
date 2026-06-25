@@ -1,0 +1,37 @@
+# Docker ビルドコンテキスト除外。build context はリポジトリ直下（compose の context: .）なので
+# Docker が実際に参照する .dockerignore は **このルート直下のファイル**（docker/Dockerfile を使っても
+# BuildKit はまず docker/Dockerfile.dockerignore、無ければコンテキスト直下の .dockerignore を読む）。
+# spec-summarizer は docker/.dockerignore に置いているが context=. では確実に効かないため、ここに置く。
+#
+# ★ 重要: external/ は **除外しない**（pii-masker submodule をイメージに COPY する必要がある）。
+#         data/ は **必ず除外**（cache.db / mask_dict.yaml / mask_allowlist.yaml＝機密・gitignore。
+#         実行時はボリュームマウントで供給する）。
+
+.venv/
+.git/
+.gitignore
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.claude/
+__pycache__/
+*.py[codz]
+
+# 環境・秘匿
+.env
+.envrc
+
+# 機密データ（実行時に ./data をボリュームマウントする）
+data/
+
+# 開発専用（イメージに不要）
+docs-dev/
+tests/
+examples/
+docker/
+
+# submodule 内の不要物（src/ だけが必要。テスト・スクリプト・ロックは除外）
+external/pii-masker/tests/
+external/pii-masker/scripts/
+external/pii-masker/.git/
+external/pii-masker/uv.lock

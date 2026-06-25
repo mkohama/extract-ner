@@ -1,0 +1,48 @@
+services:
+  data-redactor-ui:
+    image: data-redactor-ui:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        APP_UID: ${UID:-1000}
+        APP_GID: ${GID:-1000}
+    container_name: data-redactor-ui
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    env_file: .env
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      # 機密データの永続化（cache.db / mask_dict.yaml / mask_allowlist.yaml）。
+      - ./data:/app/data
+      # -- Entra ID 認証（ホストの az login キャッシュを流用する場合はコメントを外す）--
+      # - ${HOME}/.azure:/home/appuser/.azure:rw
+    # -- kb-mcp がホスト側で動く場合、コンテナからは localhost ではなく host.docker.internal で繋ぐ。
+    #    .env で KB_MCP_URL=http://host.docker.internal:8000/mcp とし、Linux では以下を有効化する
+    #    （Docker Desktop / Mac / Windows では既定で解決できるため不要）。
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+  # ---------------------------------------------------------------------------
+  # 将来: mask / unmask の HTTP API サービス（想定B）。
+  # UI とは別エントリ（別 CMD・別ポート）で同じイメージを使い回す想定。API 設計が固まったら
+  # 以下のような別サービスを足すだけでよい（Dockerfile はそのまま流用できる）。
+  # ---------------------------------------------------------------------------
+  # data-redactor-api:
+  #   image: data-redactor-ui:latest
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile
+  #     args:
+  #       APP_UID: ${UID:-1000}
+  #       APP_GID: ${GID:-1000}
+  #   container_name: data-redactor-api
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8000:8000"
+  #   env_file: .env
+  #   user: "${UID:-1000}:${GID:-1000}"
+  #   volumes:
+  #     - ./data:/app/data
+  #   command: ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
