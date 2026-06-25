@@ -1088,10 +1088,7 @@ def run_llm_detection(
 
 def render_llm_result(body_text: str, detection: LlmDetection) -> None:
     """LLM 単独ビュー（出口1）：LLM が拾った検出だけを displaCy＋表で表示する。"""
-    st.caption(
-        f"モデル: `{detection.model}` / detector_version: `{detection.detector_version}`"
-        "　— LLM（pii-masker）が拾った検出のみ。GiNZA/辞書とは混ぜない素の結果。"
-    )
+    st.caption(f"モデル `{detection.model}` / 版 `{detection.detector_version}`")
     col_main, col_side = st.columns([3, 1])
     with col_side:
         st.metric("検出（位置特定済み）", f"{len(detection.spans)} 件")
