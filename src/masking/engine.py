@@ -115,14 +115,15 @@ _ENE_TO_CATEGORY: dict[str, str] = {
     "Email": "連絡先",
     "Phone_Number": "連絡先",
     "Trademark": "商標",  # pii-masker への要望 type。主要カテゴリなので必須
-    # 識別子は「その他」へ畳むが、LLM 由来は微弱降格を免除し中（レビュー）に残す（_LLM_IDENTIFIER_TYPES）。
+    # 識別子は「その他」へ畳む（＝確信度は弱固定）。ただし LLM 由来は微弱降格を免除し弱のままレビューに残す（_LLM_IDENTIFIER_TYPES）。
     "Employee_ID": "その他",
     "Account": "その他",
     "IP_Address": "その他",
 }
 
-# 「その他」へ畳むが、LLM が付けたこれらは _looks_like_code による微弱降格を**免除**する
-# （`7-410` 型の社員番号等が消えると recall 漏れ＝致命的。中＝レビューに必ず残す。§7-④）。
+# 「その他」へ畳むので確信度は**弱固定**。ただし LLM が付けたこれらは _looks_like_code による
+# 微弱降格を**免除**する（`7-410` 型の社員番号等が消えると recall 漏れ＝致命的）。
+# ＝弱のままレビューに必ず残す（既定で自動マスクはされないが、候補から消えずデータにも残る。§7-④）。
 _LLM_IDENTIFIER_TYPES = frozenset({"Employee_ID", "Account", "IP_Address"})
 
 # 連絡先（category=連絡先）の正規表現。NER は @ や数字に過剰発火して不安定なので、

@@ -72,13 +72,14 @@ LLM 検出キャッシュは `(content_hash, model, flatten, detector_version)` 
 **検出結果に影響する設定を変えたら detector_version を変える**——こうするとキャッシュが不一致になり自動で
 再検出されます（変え忘れると古い結果が使い回される＝最大の落とし穴）。
 
-detector_version（例 `pii-masker@9d9942e|win7000ov0`）は **2 つの版**を `|` 区切りで持ち、
+detector_version（例 `pii-masker@9d9942e|win15000ov0|tgtall`）は **3 つの版**を `|` 区切りで持ち、
 `app.py` の `_detector_version()` が合成します。**変える契機も方法もそれぞれ別**です:
 
 | 部分 | 変える契機 | 方法 |
 |---|---|---|
 | `pii-masker@<hash>` | pii-masker（submodule）を更新したとき | `sync-pii-masker` が新ハッシュに**自動置換**（`app.py` の `_DETECTOR_STATIC`） |
 | `win…` | 窓ポリシー（窓の大きさ）を変えたいとき | **環境変数を設定するだけ**（下記）。値から `win…` が自動合成され、キャッシュも自動無効化 |
+| `tgt…` | LLM 検出対象（`all`↔`pii`）を変えたいとき | **環境変数を設定するだけ**（下記）。`tgt<target>` が自動合成され、キャッシュは target 別に分かれる |
 
 > 技術的に効いているのは「**文字列全体が前回と変わること**」だけ（変わればキャッシュキーが不一致＝再検出）。
 > `win…` は実値（例 `win6000ov400`）が埋め込まれるので、どのキャッシュがどの窓ポリシーで作られたか
@@ -95,7 +96,7 @@ LLM に本文を渡す前の「窓」分割の大きさは **`.env` の環境変
 
 | 環境変数 | 既定 | 意味 |
 |---|---|---|
-| `LLM_WINDOW_MAX_TOKENS` | 7000 | 1 窓の上限トークン数（小さいほど窓が増え API 回数↑だが mini の長文取りこぼしは減る） |
+| `LLM_WINDOW_MAX_TOKENS` | 15000 | 1 窓の上限トークン数（小さいほど窓が増え API 回数↑だが mini の長文取りこぼしは減る）。15000≒散文1.1〜1.6万文字/窓 |
 | `LLM_WINDOW_OVERLAP_TOKENS` | 0 | 窓間の重なり（**0=重なり無し**。窓の継ぎ目で先行文脈を次窓へ持ち越したいなら 100〜200。窓化は段落境界で割るので実体は切れない） |
 
 値を変えると detector_version の `win…` が自動で変わり、**LLM 検出キャッシュが自動で無効化＝再検出**されます。
@@ -104,6 +105,20 @@ LLM に本文を渡す前の「窓」分割の大きさは **`.env` の環境変
 
 > `win…`（env）は pii-masker の更新有無に関係なく、こちら都合で変える設定です（下の pii-masker
 > 追従手順とは別物）。逆に pii-masker を更新しても、窓ポリシーを触っていなければ `win…` は変わりません。
+
+##### LLM 検出対象（target）の切替 — 環境変数
+
+LLM（pii-masker）に「何を抜かせるか」を **`.env` の環境変数だけで切替**できます（コード編集・コミット不要）。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `LLM_DETECT_TARGET` | `all` | `all`＝人名/社名/商標の調教済み3種（高精度。実際にマスクしたいのがこの3種なので既定）。`pii`＝従来の全type汎用（地名/連絡先/ID も拾うが精度はやや落ちる・単一プロンプト）。認識値は `all`/`pii` のみ・不正値は安全側の `all` へ |
+
+値を変えると detector_version の `tgt…` が自動で変わり、**LLM 検出キャッシュが target 別に分かれて自動で無効化＝再検出**されます。
+地名/連絡先/ID 系は GiNZA・regex でも補えるため、既定 `all` でも recall の主目的（人名/社名/商標）は満たします。
+全type を LLM からも拾いたいときだけ `LLM_DETECT_TARGET=pii` にします。
+
+> `tgt…`（env）も `win…` と同じくこちら都合で変える設定で、pii-masker の更新有無とは無関係です。
 
 #### pii-masker が更新されたら（追従手順）
 
@@ -124,7 +139,7 @@ uv run data-redactor sync-pii-masker
    検出器が変わっても古いキャッシュが使い回される＝最大の落とし穴）
 4. **ENE type ドリフト検査**（pii-masker のプロンプトの型 vs `src/masking/engine.py` の
    `_ENE_TO_CATEGORY`）。マップに無い新 type は「その他」に落ちて recall 漏れになるため警告する
-5. submodule の変更点（`detector_llm.py` / `schema.py` / `locate.py` 等）を表示
+5. submodule の変更点（`targets.py`＝プロンプト/型 / `detector_llm.py` / `schema.py` / `locate.py` 等）を表示
 6. `external/pii-masker` と `app.py` を **stage**（コミットはしない）
 7. `ruff` / `mypy` / `pytest` を実行
 
@@ -202,7 +217,7 @@ Streamlit UI をコンテナで動かします。`make` は `id -u` を使うた
 git submodule update --init
 
 # 2) .env を用意（LLM 経路を使う場合。.env.example をコピーして実値を入れる）
-#    RESOURCE_NAME_GPT41_MINI / DEFAULT_LLM_MODEL / KB_MCP_URL / LLM_WINDOW_* を設定
+#    RESOURCE_NAME_GPT41_MINI / DEFAULT_LLM_MODEL / KB_MCP_URL / LLM_WINDOW_* / LLM_DETECT_TARGET を設定
 cp .env.example .env
 
 # 3) 起動（ビルド＋デタッチ）。初回ビルドは torch＋ELECTRA 重みの DL で時間がかかります

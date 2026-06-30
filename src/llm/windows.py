@@ -16,7 +16,9 @@ from src.ner.preprocess import CHUNK_SEPARATOR
 # 窓の既定サイズ（① の決定: 容量でなく「信頼できる長さ」で切る。mini の長文 recall 劣化を避ける）。
 # これはコミット済みのベースライン。実運用の上書きは app.py 側で env（LLM_WINDOW_MAX_TOKENS /
 # LLM_WINDOW_OVERLAP_TOKENS）から行い、値は detector_version の win… に自動反映される（windows.py は純粋に保つ）。
-DEFAULT_MAX_TOKENS = 7000
+# 15000 トークンは散文で約1.1〜1.6万文字、表/コード混在でも約3万文字弱／窓に収まり、pii-masker の
+# 「3万文字までは安全・5万は怪しい」目安の内側。recall を守りつつ 7000 より API 回数を減らす値（2026-06-30 既定化）。
+DEFAULT_MAX_TOKENS = 15000
 # 窓間 overlap（境界で先行文脈が切れるのを緩和。重複検出は detect_layer の解決で潰れる）。**既定 0＝重なり無し**
 # （窓化は CHUNK_SEPARATOR 境界で割るので実体は文字単位に切れない。継ぎ目の先行文脈が要るなら 100〜200 へ）。
 DEFAULT_OVERLAP_TOKENS = 0

@@ -524,21 +524,24 @@ def _git_out(args: list[str], cwd: Path) -> str:
 
 
 def _pii_masker_ene_types(sub: Path) -> set[str] | None:
-    """pii-masker の検出プロンプトから ENE type 名の集合を抽出する（取れなければ None）。
+    """pii-masker が宣言する ENE type 名の集合を返す（取れなければ None）。
 
-    型は ``detector_llm.py`` の ``DETECTION_INSTRUCTION`` 内に人手で列挙されている。
-    「…選ぶ:」～「出力は…」の範囲で、各型名は全角 ``（`` の直前に置かれる
-    （例 ``Person（人名…）`` ``Province（都道府県） / City（市区町村）``）ので、そこだけ拾う。
-    説明文中の語（``…などのID`` ``IPアドレス`` 等）を型名と誤認しないための限定。
-    プロンプト書式が大きく変わると None を返す（その場合は手動確認を促す）。
+    出所は ``schema.py`` の ``PII_TYPES``（detector のプロンプトと GT で揃える語彙の正本。
+    全 target を通じて LLM が出しうる type の宣言一覧で、個別 target 専用の ``Trademark`` も含む）。
+    かつては汎用検出プロンプト本文を正規表現で走査していたが、(1) プロンプトが ``targets.py`` へ移り、
+    (2) 汎用プロンプト(pii)には ``Trademark`` が無いため「マップにあるがプロンプトに無い」と毎回
+    誤警告が出た。そこで宣言一覧（PII_TYPES）を直接読む方式に変えた（import せず list リテラルを
+    走査＝依存・副作用なし）。``PII_TYPES = [...]`` の書式が大きく変わると None を返す（手動確認を促す）。
     """
-    detector = sub / "src" / "pii_masker" / "detector_llm.py"
-    if not detector.exists():
+    schema = sub / "src" / "pii_masker" / "schema.py"
+    if not schema.exists():
         return None
-    block = re.search(r"選ぶ:(.*?)出力は", detector.read_text(encoding="utf-8"), re.S)
+    block = re.search(
+        r"PII_TYPES.*?=\s*\[(.*?)\]", schema.read_text(encoding="utf-8"), re.S
+    )
     if not block:
         return None
-    return set(re.findall(r"([A-Z][A-Za-z_]+)\s*（", block.group(1)))
+    return set(re.findall(r'"([A-Z][A-Za-z_]+)"', block.group(1))) or None
 
 
 @cli.command(name="sync-pii-masker")
@@ -620,16 +623,16 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
         except subprocess.CalledProcessError:
             click.echo(f"（{old_hash}..HEAD の差分を取得できませんでした）")
         click.echo(
-            "→ detector_llm.py（プロンプト/型）・schema.py・locate.py の変更は "
-            "src/llm のアダプタ契約（detect/locate_all の戻り値）に影響します。"
+            "→ targets.py（プロンプト/型一覧＝target 別指示）・detector_llm.py（detect/extract）・"
+            "schema.py・locate.py の変更は src/llm のアダプタ契約（detect/locate_all の戻り値）に影響します。"
         )
 
-    # ④-b ENE type ドリフト（プロンプトの型 vs _ENE_TO_CATEGORY）
+    # ④-b ENE type ドリフト（schema.py の PII_TYPES vs _ENE_TO_CATEGORY）
     types = _pii_masker_ene_types(_SUBMODULE)
     click.echo("\n===== ENE type ドリフト検査 =====")
     if types is None:
         click.echo(
-            "⚠ プロンプトから type 一覧を抽出できませんでした。detector_llm.py を手動確認してください。"
+            "⚠ schema.py の PII_TYPES から type 一覧を抽出できませんでした。schema.py を手動確認してください。"
         )
     else:
         mapped = set(_ENE_TO_CATEGORY)
@@ -646,7 +649,7 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
             click.echo("マップ漏れの新 type はありません。")
         if extra:
             click.echo(
-                "・マップにあるがプロンプトに無い type（先取り/廃止の可能性。多くは無害）: "
+                "・マップにあるが pii-masker の PII_TYPES に無い type（先取り/廃止の可能性。多くは無害）: "
                 + ", ".join(extra)
             )
 
