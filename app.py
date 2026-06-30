@@ -26,8 +26,10 @@ from src.masking import (
     MaskDictionary,
     MaskingEngine,
     NerCache,
+    allowlist_sort_key,
     apply_allowlist_to_analysis,
     content_hash,
+    dict_sort_key,
     load_allowlist_entries,
     load_entries,
     save_allowlist_entries,
@@ -819,6 +821,16 @@ def render_dict_editor(dict_path: str) -> None:
     )
     path = Path(dict_path)
     entries = load_entries(path) if path.exists() else []
+    # 既定でセクション順（社名→商標→人名→その他）＋各内を代表表記の辞書順に表示（保存も同順）。
+    _section_rank = {"社名": 0, "商標": 1, "人名": 2}
+    entries = sorted(
+        entries,
+        key=lambda e: (
+            _section_rank.get(e["category"], 3),
+            e["category"],
+            dict_sort_key(e["canonical"]),
+        ),
+    )
     rows = [
         {
             "カテゴリ": e["category"],
@@ -967,6 +979,9 @@ def render_allowlist_editor(allowlist_path: str) -> None:
     )
     path = Path(allowlist_path)
     surfaces = load_allowlist_entries(path) if path.exists() else []
+    surfaces = sorted(
+        surfaces, key=allowlist_sort_key
+    )  # 既定で辞書順表示（保存も同順）
     # dtype="string" を明示：空（surfaces=[]）だと既定で float64 列になり data_editor が
     # 数値入力欄を出して**文字を打てない**（＝新規登録できない）バグになる。TextColumn でも固定。
     df = pd.DataFrame({"除外語": pd.Series(surfaces, dtype="string")})

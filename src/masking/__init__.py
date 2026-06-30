@@ -11,6 +11,7 @@ from src.masking.allowlist import (
     load_allowlist_entries,
     save_allowlist_entries,
 )
+from src.masking.allowlist import sort_key as allowlist_sort_key
 from src.masking.cache import NerCache, content_hash
 from src.masking.dictionary import (
     DictMatch,
@@ -19,6 +20,7 @@ from src.masking.dictionary import (
     normalize,
     save_entries,
 )
+from src.masking.dictionary import sort_key as dict_sort_key
 from src.masking.engine import (
     AUTO_MASK_CONFIDENCE,
     Candidate,
@@ -48,9 +50,11 @@ __all__ = [
     "tally_votes",
     "load_entries",
     "save_entries",
+    "dict_sort_key",
     "MaskAllowlist",
     "load_allowlist_entries",
     "save_allowlist_entries",
+    "allowlist_sort_key",
     "apply_allowlist",
     "apply_allowlist_to_analysis",
     "NerCache",

@@ -90,8 +90,17 @@ def load_allowlist_entries(path: str | Path) -> list[str]:
     return out
 
 
+def sort_key(surface: str) -> str:
+    """除外語の並び順キー（正規化＝NFKC+casefold で大小・全角半角を無視した辞書順）。
+
+    照合キー（:func:`_match_key`）と同じ正規化を使う。件数が増えても探しやすいよう、
+    保存・表示の双方で同じ順序にするため共有する。
+    """
+    return _match_key(surface)
+
+
 def save_allowlist_entries(path: str | Path, surfaces: Iterable[str]) -> None:
-    """除外語リストを YAML に書き出す（UI 保存用）。空白除去・重複排除・出現順維持。"""
+    """除外語リストを YAML に書き出す（UI 保存用）。空白除去・重複排除・正規化辞書順にソート。"""
     kept: list[str] = []
     seen: set[str] = set()
     for s in surfaces:
@@ -100,6 +109,7 @@ def save_allowlist_entries(path: str | Path, surfaces: Iterable[str]) -> None:
             continue
         seen.add(s)
         kept.append(s)
+    kept.sort(key=sort_key)
     Path(path).write_text(
         yaml.safe_dump({_SECTION: kept}, allow_unicode=True, sort_keys=False, indent=2),
         encoding="utf-8",

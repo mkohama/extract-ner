@@ -260,13 +260,22 @@ def load_entries(path: str | Path) -> list[dict]:
     return entries
 
 
+def sort_key(canonical: str) -> str:
+    """辞書エントリの並び順キー（代表表記を NFKC+casefold で正規化した辞書順）。
+
+    照合用 :func:`normalize` と同じ正規化（大小・全角半角・空白を無視）。件数が増えても
+    探しやすいよう、各セクション内を代表表記でソートする。除外リスト側と方針を揃える。
+    """
+    return normalize(canonical)
+
+
 def save_entries(path: str | Path, entries: list[dict]) -> None:
     """構造化エントリを YAML に書き出す（UI 保存用）。
 
     canonical が空のエントリは捨てる。別名・置換が無ければ文字列だけの簡潔形で書く。
-    セクション順は 社名 → 商標 → 人名 →（その他）。
+    セクション順は 社名 → 商標 → 人名 →（その他）。各セクション内は代表表記の辞書順にソート。
     """
-    sections: dict[str, list] = {}
+    sections: dict[str, list[tuple[str, dict | str]]] = {}
     for e in entries:
         canonical = (e.get("canonical") or "").strip()
         if not canonical:
@@ -288,10 +297,18 @@ def save_entries(path: str | Path, entries: list[dict]) -> None:
             item = obj
         else:
             item = canonical
-        sections.setdefault(section, []).append(item)
+        sections.setdefault(section, []).append((canonical, item))
 
-    ordered = {s: sections[s] for s in ("社名", "商標", "人名") if s in sections}
-    ordered.update({s: v for s, v in sections.items() if s not in ordered})
+    # 各セクション内を代表表記でソートしてから item だけ取り出す。
+    sorted_sections: dict[str, list] = {
+        section: [item for _, item in sorted(rows, key=lambda r: sort_key(r[0]))]
+        for section, rows in sections.items()
+    }
+
+    ordered = {
+        s: sorted_sections[s] for s in ("社名", "商標", "人名") if s in sorted_sections
+    }
+    ordered.update({s: v for s, v in sorted_sections.items() if s not in ordered})
     Path(path).write_text(
         yaml.safe_dump(ordered, allow_unicode=True, sort_keys=False, indent=2),
         encoding="utf-8",
