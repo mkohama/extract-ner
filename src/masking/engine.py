@@ -155,13 +155,19 @@ _CONTACT_PATTERNS: tuple[re.Pattern[str], ...] = (_EMAIL_RE,)
 # 変数名/列挙子）とみなし、中/弱 の候補を **微弱**（既定で非表示・自動マスク外）へ落とす（§ analyze）。
 # 確定/強（辞書・連絡先・2系統一致・昇格）は対象にしない＝確信度の根拠があるものは守る。
 _CODE_MARKER_RE = re.compile(
-    r"[_@~]|::"
-)  # Em_NoYes / Em_OffOn::idOff / ピッチ@ / ~C02 等
+    r"[_@~\[\]{}=!<>;|]|::"
+)  # Em_NoYes / Em_OffOn::idOff / ピッチ@ / ~C02 / `37D]==0` / `a=b` 等（[ ] { } = ! < > ; | も）
 # 「名前に使われる字」＝英字 or 日本語（かな U+3040-30FF・漢字 U+3400-9FFF）。これを 1 つも
 # 含まない＝数字/記号のみ（例 7-410）。
 _NAME_CHAR_RE = re.compile(r"[A-Za-z぀-ヿ㐀-鿿]")
 # 漢字 1 文字（U+3400-9FFF）。1 文字語のうち漢字は実在姓（林・森・関・南 等）があるので保護する。
 _KANJI_RE = re.compile(r"[㐀-鿿]")
+# 英数字コード（16D / 1L / 37D）。ASCII のみ＋数字混在＝識別子。実在の人名・社名はまず数字を含まない
+# （`7-Eleven`/`3M` 等は稀＝辞書登録で守る）。`-`/`.`/`&` は社名にあり得るのでマーカーには入れない。
+_ASCII_DIGIT_CODE_RE = re.compile(r"^[\x21-\x7e]*[0-9][\x21-\x7e]*$")
+# 全大文字ASCII（略語/ジャーゴン。FIARSL / EGPDPRY）。NER の **人名** 票はこれを実在人名と見なさない
+# （実在の人名に全大文字ASCIIは無い）。社名は IBM/SAP/AWS 等があるので別扱い（_system_category の Stage 1）。
+_ALLCAPS_ASCII_RE = re.compile(r"^[A-Z][A-Z0-9]*$")
 
 
 @dataclass(frozen=True)
@@ -310,20 +316,38 @@ def tally_votes(votes: Iterable[tuple[str, str]]) -> Counter[str]:
 _DECISIVE_CHANNELS = frozenset({"dict", "session", "regex"})
 
 
-def _system_category(votes: Iterable[tuple[str, str]], *, llm: bool) -> str | None:
+def _system_category(
+    votes: Iterable[tuple[str, str]], surface: str, *, llm: bool
+) -> str | None:
     """1 系統の票を **1 カテゴリ**へ畳む（系統内合議）。``llm=True``＝LLM 系統 / ``False``＝NER 系統。
 
     NER 系統＝``dict``/``session``/``regex``/``llm`` 以外の全チャネル（sudachi・各 GiNZA モデル）。
     系統内では **特別（人名/社名/商標）が地名/その他に勝ち、重い特別が勝つ**＝``_CAT_PRIORITY``
     最上位を採る（NER が何チャネル一致しても外に出す意見は 1 つ＝§13）。票が無ければ None。
+
+    **Stage 1（NER 限定・surface で特別票を弱める）**：ja_ginza 等が英字/コードを社名・人名へ
+    誤爆するため、NER の特別票を surface で「その他」に落とし、**コードノイズが LLM と組んで
+    「強」になる経路を断つ**（その後 1 系統＝中→ Stage 2 ``_demote_code_like`` で微弱化される）。
+    カテゴリ非対称：
+    - **人名**：全大文字ASCII（FIARSL）／コードらしき → その他（実在人名に全大文字ASCIIは無い）。
+    - **社名**：コードらしき のみ → その他（``IBM``/``SAP`` 等の全大文字ASCII単体は正当ゆえ守る）。
+    LLM 票は弱めない（文脈判定を尊重）。
     """
-    cats = [
-        cat
-        for ch, label in votes
-        if (ch == "llm") == llm
-        and ch not in _DECISIVE_CHANNELS
-        and (cat := vote_category(ch, label)) is not None
-    ]
+    cats: list[str] = []
+    for ch, label in votes:
+        if (ch == "llm") != llm or ch in _DECISIVE_CHANNELS:
+            continue
+        cat = vote_category(ch, label)
+        if cat is None:
+            continue
+        if not llm:  # Stage 1: NER の特別票を surface で弱める（カテゴリ非対称）
+            if cat == "人名" and (
+                _looks_like_code(surface) or _ALLCAPS_ASCII_RE.match(surface)
+            ):
+                cat = "その他"
+            elif cat == "社名" and _looks_like_code(surface):
+                cat = "その他"
+        cats.append(cat)
     return min(cats, key=lambda c: _CAT_RANK.get(c, 99)) if cats else None
 
 
@@ -712,19 +736,23 @@ def _looks_like_code(surface: str) -> bool:
     """社内コード/変数名らしき表層か（実在の人名・社名には現れない特徴）。
 
     いずれかに該当：
-    - 記号マーカー ``_`` / ``::`` / ``@`` / ``~`` を含む（例 ``Em_NoYes`` / ``Em_OffOn::idOff``
-      / ``ピッチ@`` / ``~C02``）。
+    - 記号マーカー ``_`` / ``::`` / ``@`` / ``~`` / ``[ ] { } = ! < > ; |`` を含む
+      （例 ``Em_NoYes`` / ``Em_OffOn::idOff`` / ``ピッチ@`` / ``~C02`` / ``37D]==0``）。
     - 英字も日本語（かな・漢字）も含まない＝数字・記号のみ（例 ``7-410``）。
+    - **ASCII のみ＋数字を含む**（例 ``16D`` / ``1L`` / ``37D``）。実在の人名・社名はまず数字を含まない。
     - **1 文字語（漢字を除く）**＝ASCII 英字・かな・数字・記号 1 文字（例 ``N`` / ``D``）。実在名では
       まず無い。ただし**漢字 1 文字は実在姓**（林・森・関 等）があるので保護＝対象外。
 
     NER（electra/ja_ginza）がこれらを社名/人名に誤ラベルし中/弱で大量に湧くため、
-    :meth:`MaskingEngine.analyze` で **中/弱 のみ** を **微弱**（既定で非表示・自動マスク外）へ落とす。
+    :meth:`MaskingEngine.analyze` で **中/弱 のみ** を **微弱**（既定で非表示・自動マスク外）へ落とす（Stage 2）。
     確定/強（辞書・連絡先・2系統一致・昇格）は対象にしない＝根拠があるものは守る。
+    NER の票そのものを弱める Stage 1 は :func:`_system_category` を参照。
     """
     if _CODE_MARKER_RE.search(surface):
         return True
     if not _NAME_CHAR_RE.search(surface):
+        return True
+    if _ASCII_DIGIT_CODE_RE.match(surface):
         return True
     return len(surface) == 1 and not _KANJI_RE.match(surface)
 
@@ -939,8 +967,8 @@ def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candida
     sys_cats = [
         c
         for c in (
-            _system_category(votes, llm=False),
-            _system_category(votes, llm=True),
+            _system_category(votes, surface, llm=False),
+            _system_category(votes, surface, llm=True),
         )
         if c is not None
     ]

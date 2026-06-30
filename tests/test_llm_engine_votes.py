@@ -15,6 +15,7 @@ from src.masking.engine import (
     _demote_code_like,
     _has_llm_identifier_vote,
     _llm_raw,
+    _looks_like_code,
     vote_category,
 )
 
@@ -153,3 +154,49 @@ def test_both_systems_chimei_is_weak() -> None:
     [c] = _cluster(text, cands)
     assert c.category == "地名"
     assert c.confidence == "弱"
+
+
+# --- コードノイズ対策（Stage 1: NER票を弱める / Stage 2: 微弱 / code-like v2） --- #
+
+
+def test_looks_like_code_v2() -> None:
+    """code-like 判定 v2：記号拡張・英数字コード・数字記号のみ・1文字を拾い、実在名は拾わない。"""
+    for s in ["16D", "1L", "37D", "Em_Foo", "a=b", "x]y", "{ }", "7-410", "N"]:
+        assert _looks_like_code(s), f"code-like のはず: {s}"
+    for s in ["田中", "ニコン", "IBM", "Sony", "Smith", "横浜市"]:
+        assert not _looks_like_code(s), f"実在名なので code-like でない: {s}"
+
+
+def test_stage1_codeish_company_not_strong() -> None:
+    """Stage1：コードらしき社名（NER）＋ LLM 商標 → 強にならない（NER 票がその他に弱まり 1系統＝中）。
+
+    旧来は NER 社名 ＋ LLM 商標 ＝ 2系統 ＝ 強 に化けていた（Em_* の過剰マスク）。
+    """
+    text = "Em_Execution"
+    cands = [
+        Candidate(0, 12, text, "社名", "", (("ja_ginza", "Show_Organization"),)),
+        Candidate(0, 12, text, "商標", "", (("llm", "Trademark"),)),
+    ]
+    [c] = _cluster(text, cands)
+    assert c.confidence == "中"  # 強ではない
+
+
+def test_stage1_allcaps_ascii_person_weakened() -> None:
+    """Stage1：全大文字ASCII を NER が人名と言っても特別に数えない（実在人名に FIARSL は無い）。"""
+    text = "FIARSL"
+    cands = [Candidate(0, 6, text, "人名", "", (("ja_ginza", "Person"),))]
+    [c] = _cluster(text, cands)
+    assert c.category != "人名"  # その他へ弱められる
+    assert c.confidence == "弱"  # 特別を出した系統が無い
+
+
+def test_stage1_keeps_legit_ascii_company_strong() -> None:
+    """社名は全大文字ASCII単体（IBM）を弱めない＝NER 社名 ＋ LLM 社名 で従来どおり強（recall 維持）。"""
+    text = "IBM"
+    cands = [
+        Candidate(0, 3, text, "社名", "", (("ja_ginza_electra", "Company"),)),
+        Candidate(0, 3, text, "社名", "", (("llm", "Company"),)),
+    ]
+    [c] = _cluster(text, cands)
+    assert c.category == "社名"
+    assert c.confidence == "強"
