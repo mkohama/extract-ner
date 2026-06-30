@@ -840,6 +840,9 @@ def render_dict_editor(dict_path: str) -> None:
             "カテゴリ": st.column_config.SelectboxColumn(
                 "カテゴリ", options=["社名", "商標", "人名"], default="社名"
             ),
+            # 空辞書だと列が float64 になり数値入力欄＝文字を打てないので TextColumn で固定。
+            "代表表記": st.column_config.TextColumn("代表表記"),
+            "別名": st.column_config.TextColumn("別名", help="カンマ区切り"),
             "置換": st.column_config.TextColumn("置換", help="空なら自動採番"),
             "内包": st.column_config.CheckboxColumn(
                 "内包",
@@ -964,12 +967,15 @@ def render_allowlist_editor(allowlist_path: str) -> None:
     )
     path = Path(allowlist_path)
     surfaces = load_allowlist_entries(path) if path.exists() else []
-    df = pd.DataFrame({"除外語": surfaces}, columns=["除外語"])
+    # dtype="string" を明示：空（surfaces=[]）だと既定で float64 列になり data_editor が
+    # 数値入力欄を出して**文字を打てない**（＝新規登録できない）バグになる。TextColumn でも固定。
+    df = pd.DataFrame({"除外語": pd.Series(surfaces, dtype="string")})
     edited = st.data_editor(
         df,
         num_rows="dynamic",
         width="stretch",
         height=500,
+        column_config={"除外語": st.column_config.TextColumn("除外語")},
         key="allowlist_editor",
     )
     if st.button("💾 除外リストを保存", type="primary", key="allowlist_save"):
