@@ -92,3 +92,64 @@ def test_non_llm_code_like_is_demoted() -> None:
     assert not _has_llm_identifier_vote(weak_code)
     [out] = _demote_code_like([weak_code])
     assert out.confidence == "微弱"
+
+
+# --- 2系統合議（A1）: NER の内部チャネル数は確信度に効かない（NERとLLMは対等な2系統） --- #
+
+
+def test_ner_only_multichannel_is_chu_not_strong() -> None:
+    """NER 系統だけなら、2モデル＋Sudachi が同じ人名でも **中**（小坂のケース）。
+
+    旧フラット集計では「2チャネル＝強」だったが、2系統合議では NER は何チャネル一致しても
+    1 系統＝中。LLM が併走して初めて 2系統＝強になる（§13）。
+    """
+    text = "小坂"
+    cands = [
+        Candidate(0, 2, "小坂", "人名", "", (("ja_ginza", "PERSON"),)),
+        Candidate(0, 2, "小坂", "人名", "", (("ja_ginza_electra", "PERSON"),)),
+        Candidate(0, 2, "小坂", "人名", "", (("sudachi", "名詞-固有名詞-人名-姓"),)),
+    ]
+    [c] = _cluster(text, cands)
+    assert c.category == "人名"
+    assert c.confidence == "中"
+
+
+def test_llm_person_beats_ner_chimei_rescued_to_chu() -> None:
+    """小浜：NER=地名（City＋Sudachi 地名）/ LLM=人名 → **人名・中**。
+
+    特別（人名）が地名に勝ち、地名・弱に埋もれさせない＝LLM の人名票の死票回収。
+    人名と言ったのは LLM 1系統のみなので確信度は中。
+    """
+    text = "小浜"
+    cands = [
+        Candidate(0, 2, "小浜", "地名", "", (("ja_ginza_electra", "CITY"),)),
+        Candidate(0, 2, "小浜", "地名", "", (("sudachi", "名詞-固有名詞-地名-一般"),)),
+        Candidate(0, 2, "小浜", "人名", "", (("llm", "Person"),)),
+    ]
+    [c] = _cluster(text, cands)
+    assert c.category == "人名"
+    assert c.confidence == "中"
+
+
+def test_two_systems_different_special_is_strong() -> None:
+    """2系統がともに特別（NER=社名 / LLM=人名）→ **強**。種別が違ってもよい（重い人名を採用）。"""
+    text = "アクメ"
+    cands = [
+        Candidate(0, 3, "アクメ", "社名", "", (("ja_ginza_electra", "COMPANY"),)),
+        Candidate(0, 3, "アクメ", "人名", "", (("llm", "Person"),)),
+    ]
+    [c] = _cluster(text, cands)
+    assert c.confidence == "強"
+    assert c.category == "人名"  # 人名 > 社名（_CAT_PRIORITY）
+
+
+def test_both_systems_chimei_is_weak() -> None:
+    """長崎：両系統とも地名（特別なし）→ **弱**。"""
+    text = "長崎"
+    cands = [
+        Candidate(0, 2, "長崎", "地名", "", (("ja_ginza_electra", "CITY"),)),
+        Candidate(0, 2, "長崎", "地名", "", (("llm", "City"),)),
+    ]
+    [c] = _cluster(text, cands)
+    assert c.category == "地名"
+    assert c.confidence == "弱"

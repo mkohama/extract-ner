@@ -3,17 +3,19 @@
 候補生成（NER 両モデル ∪ Sudachi 品詞 ∪ マスク辞書）→ 確信度づけ → 選択された候補で
 マスク適用（文書内収集で全出現に展開）。設計の背景は docs-dev/対策仮説.md を参照。
 
-確信度（カテゴリごとの「票数」で決める。票＝そのカテゴリへ投票した別チャネル数。
-チャネル＝辞書/Sudachi/NER(ja_ginza)/NER(electra)。同一チャネルの複数形態素は 1 票）：
-- カテゴリ … by-cat 最多票のカテゴリ（同票のみ _CAT_PRIORITY でタイブレーク）。
+確信度（**NER×LLM の2系統合議**で決める＝§13）。NER と LLM は対等な2系統で、
+NER の中の sudachi/electra/ja_ginza は「票」でなく系統内入力（NER は内部で何チャネル一致しても
+外に出す意見は 1 つ）。フラット集計だと NER の3チャネルが LLM の1票を圧殺するため等分にする：
+- カテゴリ … 各系統を 1 カテゴリへ畳み（特別=人名/社名/商標 が地名/その他に勝つ・重い特別が勝つ）、
+  系統間でも同じく特別優先・重い方（_CAT_PRIORITY）。
 - 確定 … **実辞書（名簿）一致のみ**。昇格（session）は確定にしない＝確定の出所は常に名簿。
-- 強  … 解決カテゴリへ 2 チャネル以上（人名/社名/商標）、**昇格（session）票**、または
-  **連絡先の正規表現一致**（決定的だが誤検出あり得るので確定でなく強。除外リストで外せる）。
-- 中  … 解決カテゴリへ 1 チャネルのみ（同上）
-- 弱  … カテゴリが 地名/その他（票数問わず。誤分類で人物が紛れるので必ずレビュー）
+- 強  … **2系統（NER∧LLM）がともに特別カテゴリを検出**（種別が違ってもよい）、**昇格（session）票**、
+  または **連絡先の正規表現一致**（決定的だが誤検出あり得るので確定でなく強。除外リストで外せる）。
+- 中  … **1系統のみ**が特別カテゴリを検出（floor：特別は必ず中以上＝弱に落とさない）。
+- 弱  … どの系統も特別を出さない（地名/その他のみ。誤分類で人物が紛れるので必ずレビュー）
 - 微弱 … 中/弱 のうち「コードらしき」表層（`_`/`::`/`@`/`~` を含む、数字・記号のみ、または漢字以外の
   1 文字＝社内コード/変数名/列挙子を NER が誤ラベルしたもの。例 `Em_NoYes` / `~C02` / `7-410` / `N`）。
-  既定で非表示・自動マスク外（データには残す＝取りこぼさない）。確定/強（辞書・連絡先・2モデル一致・
+  既定で非表示・自動マスク外（データには残す＝取りこぼさない）。確定/強（辞書・連絡先・2系統一致・
   昇格）は対象外。漢字 1 文字は実在姓（林・森 等）があるので保護＝微弱にしない。
 
 昇格（session）＝ phase1 で強になった語を「確認済み」として phase2 に再注入したもの（§ analyze）。
@@ -151,7 +153,7 @@ _CONTACT_PATTERNS: tuple[re.Pattern[str], ...] = (_EMAIL_RE,)
 
 # 「コードらしさ」判定用。実在の人名・社名には現れない特徴を持つ語＝NER の誤ラベル（社内コード/
 # 変数名/列挙子）とみなし、中/弱 の候補を **微弱**（既定で非表示・自動マスク外）へ落とす（§ analyze）。
-# 確定/強（辞書・連絡先・2モデル一致・昇格）は対象にしない＝確信度の根拠があるものは守る。
+# 確定/強（辞書・連絡先・2系統一致・昇格）は対象にしない＝確信度の根拠があるものは守る。
 _CODE_MARKER_RE = re.compile(
     r"[_@~]|::"
 )  # Em_NoYes / Em_OffOn::idOff / ピッチ@ / ~C02 等
@@ -287,11 +289,13 @@ def vote_category(channel: str, label: str) -> str | None:
 
 
 def tally_votes(votes: Iterable[tuple[str, str]]) -> Counter[str]:
-    """票集合 → カテゴリ別の「チャネル数」。確信度・カテゴリ決定はこの集計で行う。
+    """票集合 → カテゴリ別の「チャネル数」（**監査用の集計**。cli の票分布表示に使う）。
 
-    票＝チャネル（同一チャネルの複数形態素＝姓+名 等は 1 票に畳む）。各票は自分のカテゴリに
-    そのまま入れる（特例なし）。Sudachi 固有名詞-一般 は「その他」のまま
-    （未知の英字トークンを社名に水増ししない＝Reject 等の汎用語を強にしない）。
+    確信度・カテゴリの**決定**は :func:`_merge` の2系統合議（NER 系統 / LLM 系統）で行う＝
+    この関数は決定には使わない。フラット集計だと NER の3チャネルが LLM の1票を圧殺するため
+    （§13「NER と LLM は対等な2系統」。NER の中の sudachi/electra/ja_ginza は票でなく系統内入力）。
+    票＝チャネル（同一チャネルの複数形態素＝姓+名 等は 1 票に畳む）。Sudachi 固有名詞-一般 は
+    「その他」のまま（未知の英字トークンを社名に水増ししない＝Reject 等の汎用語を強にしない）。
     """
     channels_by_cat: dict[str, set[str]] = defaultdict(set)
     for ch, label in votes:
@@ -301,11 +305,26 @@ def tally_votes(votes: Iterable[tuple[str, str]]) -> Counter[str]:
     return Counter({cat: len(chs) for cat, chs in channels_by_cat.items()})
 
 
-def _top_category(counts: Counter[str]) -> str:
-    """カテゴリ別票数から代表カテゴリを選ぶ（最多票。同票のみ _CAT_PRIORITY でタイブレーク）。"""
-    best = max(counts.values())
-    tied = [c for c, n in counts.items() if n == best]
-    return next((c for c in _CAT_PRIORITY if c in tied), tied[0])
+# 確信度を数える系統（NER / LLM）から外す決定的チャネル。
+#   dict=確定（名簿）／session=昇格（確認済＝強）／regex=連絡先（決定的＝強。実体は _merge を通らない）。
+_DECISIVE_CHANNELS = frozenset({"dict", "session", "regex"})
+
+
+def _system_category(votes: Iterable[tuple[str, str]], *, llm: bool) -> str | None:
+    """1 系統の票を **1 カテゴリ**へ畳む（系統内合議）。``llm=True``＝LLM 系統 / ``False``＝NER 系統。
+
+    NER 系統＝``dict``/``session``/``regex``/``llm`` 以外の全チャネル（sudachi・各 GiNZA モデル）。
+    系統内では **特別（人名/社名/商標）が地名/その他に勝ち、重い特別が勝つ**＝``_CAT_PRIORITY``
+    最上位を採る（NER が何チャネル一致しても外に出す意見は 1 つ＝§13）。票が無ければ None。
+    """
+    cats = [
+        cat
+        for ch, label in votes
+        if (ch == "llm") == llm
+        and ch not in _DECISIVE_CHANNELS
+        and (cat := vote_category(ch, label)) is not None
+    ]
+    return min(cats, key=lambda c: _CAT_RANK.get(c, 99)) if cats else None
 
 
 def _representative(members: list[Candidate]) -> Candidate:
@@ -409,7 +428,7 @@ class MaskingEngine:
         surfaces = [t.surface for t in tokens]
 
         # LLM（pii-masker）検出を `llm` チャネルの票として合流（J2）。新カテゴリ・新確信度は作らず、
-        #   tally_votes に1チャネルとして流すだけ＝単独→中／NER 相乗り→強／確定は名簿のみ（§7-②）。
+        #   2系統合議に **LLM 系統**として流すだけ＝単独→中／NER 系統と相乗り→強／確定は名簿のみ（§7-②）。
         if llm_detection is not None:
             other_raw.extend(_llm_raw(llm_detection, text))
 
@@ -564,7 +583,7 @@ def _llm_raw(detection: LlmDetection, text: str) -> list[Candidate]:
     """LLM 検出（``LlmDetection``）の各スパンを ``llm`` チャネルの生票に変換する（Stage B）。
 
     票のラベルは生 ENE type（``vote_category`` が ``_ENE_TO_CATEGORY`` で6カテゴリへ写す）。
-    生成段階のカテゴリは仮（最終カテゴリは tally_votes が決める）が、未投票時の保険として写像値を入れる。
+    生成段階のカテゴリは仮（最終カテゴリは _merge の2系統合議が決める）が、未投票時の保険として写像値を入れる。
     """
     out: list[Candidate] = []
     for sp in detection.spans:
@@ -581,7 +600,7 @@ def _has_llm_identifier_vote(c: Candidate) -> bool:
 def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
     """中/弱 の「コードらしき」誤検出を微弱へ落とす（既定で非表示・自動マスク外。データは残す）。
 
-    確定/強（辞書・連絡先・2モデル一致・昇格）は守る＝中/弱 のみ対象。例外：LLM が識別子
+    確定/強（辞書・連絡先・2系統一致・昇格）は守る＝中/弱 のみ対象。例外：LLM が識別子
     （社員番号/アカウント/IP）と判定したものは免除＝レビューに残す（§7-④。`7-410` 型でも消さない）。
     """
     return [
@@ -622,7 +641,7 @@ def _split_on_separators(text: str, start: int, end: int) -> list[tuple[int, int
 
 # --------------------------------------------------------------------------- #
 # チャネル別の票生成（§13 のチャネル分離）。各関数は「生候補（confidence 未確定）」の列を返す。
-# 集約（_cluster/tally_votes/_confidence）はチャネル非依存なので、ここを足し引きするだけで
+# 集約（_cluster/_merge の2系統合議）はチャネル非依存なので、ここを足し引きするだけで
 # 「走ったチャネルだけ集計」が表現できる（NER 任意化＝④ の土台）。
 # --------------------------------------------------------------------------- #
 def _dict_matches_raw(
@@ -701,7 +720,7 @@ def _looks_like_code(surface: str) -> bool:
 
     NER（electra/ja_ginza）がこれらを社名/人名に誤ラベルし中/弱で大量に湧くため、
     :meth:`MaskingEngine.analyze` で **中/弱 のみ** を **微弱**（既定で非表示・自動マスク外）へ落とす。
-    確定/強（辞書・連絡先・2モデル一致・昇格）は対象にしない＝根拠があるものは守る。
+    確定/強（辞書・連絡先・2系統一致・昇格）は対象にしない＝根拠があるものは守る。
     """
     if _CODE_MARKER_RE.search(surface):
         return True
@@ -731,17 +750,6 @@ def _contact_candidates(text: str) -> list[Candidate]:
                 )
             )
     return out
-
-
-def _confidence(category: str, counts: Counter[str]) -> str:
-    """解決カテゴリと「カテゴリ別票数」から確信度を決める（辞書一致は _merge 側で確定扱い）。
-
-    強/中は **解決カテゴリへ投票したチャネル数**で決める（他カテゴリの票では水増ししない）。
-    地名/その他は誤分類で人物が紛れるため票数によらず弱（必ずレビュー）。
-    """
-    if category in ("地名", "その他"):
-        return "弱"
-    return "強" if counts.get(category, 0) >= 2 else "中"
 
 
 def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
@@ -911,28 +919,47 @@ def _resolve_cluster(
 
 
 def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candidate:
+    """重なる票群を 1 候補へ。種別・確信度は **NER×LLM の2系統合議**で決める（§13）。
+
+    ① 種別＝特別（人名/社名/商標）が地名/その他に勝つ・両系統が別の特別なら重い方（_CAT_PRIORITY）。
+    ② 確信度＝「特別（隠すべき）」と言った**系統数**：2系統=強／1系統=中（floor）／特別なし=弱。
+       辞書=確定（最優先・名簿）／昇格(session)=強。NER の内部チャネル数は確信度に効かない。
+    """
     votes = tuple(dict.fromkeys(v for m in members for v in m.votes))
-    # 辞書票があれば辞書のカテゴリで確定（NER/Sudachi の票数によらず最優先）。
+    surface = text[start:end]
+    # 辞書票があれば辞書のカテゴリで確定（系統の票数によらず最優先＝名簿が砦）。
     dict_cats = [
         cat
         for ch, label in votes
         if ch == "dict" and (cat := vote_category(ch, label)) is not None
     ]
     if dict_cats:
-        return Candidate(start, end, text[start:end], dict_cats[0], "確定", votes)
-    # 票が無ければ（理論上稀）カテゴリ未確定の中扱いで残す。
-    counts = tally_votes(votes)
-    if not counts:
-        return Candidate(start, end, text[start:end], members[0].category, "中", votes)
-    category = _top_category(counts)
-    confidence = _confidence(category, counts)
-    # 昇格（session＝他箇所で確認済み）票がそのカテゴリにあれば最低でも強（自動マスク）。
-    #   実辞書ではないので確定にはしない＝確定は実辞書だけ、という区別を保つ。
+        return Candidate(start, end, surface, dict_cats[0], "確定", votes)
+    # 各系統を 1 カテゴリへ畳む（系統内合議）。NER 系統 / LLM 系統。
+    sys_cats = [
+        c
+        for c in (
+            _system_category(votes, llm=False),
+            _system_category(votes, llm=True),
+        )
+        if c is not None
+    ]
+    if not sys_cats:
+        # 系統票が無い（session 昇格のみ等）＝カテゴリ未確定の中扱い（下の昇格で強になり得る）。
+        category, confidence = members[0].category, "中"
+    else:
+        # ① 種別＝特別が地名/その他に勝つ・重い特別が勝つ＝_CAT_PRIORITY 最上位。
+        category = min(sys_cats, key=lambda c: _CAT_RANK.get(c, 99))
+        # ② 確信度＝特別（地名/その他でない）と言った系統数。2系統=強／1系統=中（floor）／0=弱。
+        n_special = sum(1 for c in sys_cats if c not in ("地名", "その他"))
+        confidence = "強" if n_special >= 2 else "中" if n_special >= 1 else "弱"
+    # 昇格（session＝他箇所で確認済み）票がそのカテゴリにあれば最低でも強（決定的だが名簿でないので
+    #   確定にはしない＝確定は実辞書だけ、という区別を保つ）。
     if category not in ("地名", "その他") and any(
         ch == "session" and vote_category(ch, label) == category for ch, label in votes
     ):
         confidence = "強"
-    return Candidate(start, end, text[start:end], category, confidence, votes)
+    return Candidate(start, end, surface, category, confidence, votes)
 
 
 def _expand(

@@ -1551,8 +1551,9 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
                     "合流したい場合は各タブで実行してください（実行後は自動で合流します）。"
                 )
             msg += (
-                "\n\n確信度：単一チャネル→中／2チャネル以上→強／辞書→確定／"
-                "正規表現パターン→強／地名・その他→弱（票数によらず）。"
+                "\n\n確信度：1系統（NER か LLM の片方）→中／2系統（NER∧LLM）→強／辞書→確定／"
+                "正規表現パターン→強／地名・その他→弱。"
+                "（NER の sudachi/electra/ja_ginza は票でなく系統内の入力＝何個一致しても NER は1系統。）"
             )
             st.info(msg)
             return
@@ -1583,7 +1584,7 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
         "合流したチャネル: 辞書＋正規表現"
         + ("＋NER" if used.get("ner") else "")
         + ("＋LLM" if used.get("llm") else "")
-        + "　— 確信度＝チャネル投票数。LLM 単独は『🤖 LLM検出』タブ（出口1）。"
+        + "　— 確信度＝特別カテゴリを出した系統数（NER∧LLM=強／片方=中）。LLM 単独は『🤖 LLM検出』タブ（出口1）。"
     )
     render_masking_result(stored)
 
