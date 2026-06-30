@@ -87,21 +87,22 @@ def detect_encoding_and_read(
 
         detected = chardet.detect(raw_content)
 
-        if detected and detected.get("encoding"):
-            detected_enc = detected["encoding"]
-            confidence = detected.get("confidence", 0)
+        if detected:
+            detected_enc = detected.get("encoding")
+            if detected_enc:
+                confidence = detected.get("confidence", 0)
 
-            # 信頼度が低い場合は警告
-            if confidence < 0.5:
-                log(
-                    f"Warning: Low confidence ({confidence}) for detected encoding {detected_enc} on {file_path}"
-                )
+                # 信頼度が低い場合は警告
+                if confidence < 0.5:
+                    log(
+                        f"Warning: Low confidence ({confidence}) for detected encoding {detected_enc} on {file_path}"
+                    )
 
-            try:
-                text = raw_content.decode(detected_enc)
-                return text, detected_enc
-            except UnicodeDecodeError:
-                pass  # 検出されたエンコーディングでも失敗
+                try:
+                    text = raw_content.decode(detected_enc)
+                    return text, detected_enc
+                except UnicodeDecodeError:
+                    pass  # 検出されたエンコーディングでも失敗
 
     except ImportError:
         log("chardet module not found. Skipping auto-detection.")

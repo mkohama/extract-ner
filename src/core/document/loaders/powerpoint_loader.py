@@ -134,7 +134,7 @@ class PowerPointLoader:
             filename=str(self.file_path),
             num_slides=len(presentation.slides),
             slide_width=presentation.slide_width,
-            slide_height=presentation.slide_height,
+            slide_height=presentation.slide_height or 0,
             slides=slides,
         )
 

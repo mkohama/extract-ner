@@ -35,9 +35,10 @@ data-redactor — GiNZA (spaCy) による日本語固有表現抽出（NER）ツ
     `[project.scripts]` が必要。追加後は `uv sync` で再インストールするとコマンドが有効になる。
 - 品質ゲート: `uv run data-redactor check`（= `uv run ruff check src main.py app.py` ＋
   `uv run mypy src main.py app.py`）。
-  - mypy の既存エラー（`src/utils/text_utils.py` / `loaders/powerpoint_loader.py`）は kb-mcp
-    移植元由来。**新規にエラーを増やさないこと**。スタブ無しライブラリは pyproject の
-    `[[tool.mypy.overrides]]` に追加して抑制する（既存の langchain_* / tiktoken と同様）。
+  - **mypy は現状 0 件（クリーン）を維持する。新規にエラーを増やさないこと**。
+    かつて kb-mcp 移植元由来の legacy 3件（`text_utils.py` / `powerpoint_loader.py`）が
+    常時出ていたが 2026-06-30 に解消済み（insight-memo 参照）。スタブ無しライブラリは
+    pyproject の `[[tool.mypy.overrides]]` に追加して抑制する（既存の langchain_* / tiktoken と同様）。
   - black は環境に入っていないことがある。スタイルは周囲に合わせる。
 - **`.venv` を握ったまま再 sync / 再起動するとアクセス拒否になる**。先に streamlit を止める:
   `Get-Process | ? { $_.CommandLine -like '*streamlit*app.py*' } | Stop-Process -Force`

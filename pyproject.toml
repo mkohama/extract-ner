@@ -104,3 +104,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# spaCy 3.7 の cli/_util.py が click 8.x で deprecated の `click.parser.split_arg_string` を import する
+# ため DeprecationWarning が出る（Click 9.0 までは実害なし・spaCy 側のコードで我々では直せない）。
+# 依存は固定（spaCy 3.7 / click 8.x）なので、この 1 件だけ抑制してテスト出力をクリーンに保つ
+# （他の警告は従来どおり表示される＝メッセージ指定の限定抑制）。
+filterwarnings = [
+    "ignore:Importing 'parser.split_arg_string' is deprecated:DeprecationWarning",
+]
