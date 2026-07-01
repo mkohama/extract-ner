@@ -76,12 +76,13 @@ _PLACEHOLDER_PREFIX = {
 # そもそもの自動マスク対象は 人名・社名・商標（地名は弱＝レビュー）。
 _NER_LABEL_CATEGORY: dict[str, str] = {
     "PERSON": "人名",
-    # 社名は**企業系3ラベルのみ**に絞る（実在の会社・企業グループ）。SHOW_ORGANIZATION(興行団体)・
-    # SPORTS_ORGANIZATION_OTHER・POLITICAL_*・GOVERNMENT・INTERNATIONAL_ORGANIZATION は業務文書で
-    # ゴミ（一般語の誤爆）になりやすいので**含めない**。これらの実在組織は LLM(Company)＋辞書で拾う。
+    # 社名は **COMPANY / COMPANY_GROUP の2ラベルのみ**（明確な会社・企業グループ）。
+    # CORPORATION_OTHER(企業その他)・SHOW_ORGANIZATION(興行団体)・SPORTS_ORGANIZATION_OTHER・
+    # POLITICAL_*・GOVERNMENT・INTERNATIONAL_ORGANIZATION は業務文書でゴミ（一般語の誤爆）に
+    # なりやすいので**含めない**（CORPORATION_OTHER も粒度が粗く社名として怪しい）。
+    # これらの実在組織は LLM(Company)＋辞書で拾う。
     "COMPANY": "社名",
     "COMPANY_GROUP": "社名",
-    "CORPORATION_OTHER": "社名",
     # Nationality(国籍)・Ethnic_Group_Other(民族)・Family(一族) は会社/組織ではないので含めない。
     # 地名は **_OTHER 系を含めない**（GPE_OTHER/GEOLOGICAL_REGION_OTHER/LOCATION_OTHER/
     # DOMESTIC_REGION_OTHER/CONTINENTAL_REGION_OTHER/FACILITY_OTHER）。粒度が粗く一般語の
