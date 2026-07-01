@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import openai
 import pandas as pd
 import streamlit as st
 
@@ -1487,6 +1488,31 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
                 stored["chunks"], flatten_tables, force=force, progress=_cb
             )
             elapsed = time.perf_counter() - t0
+        except openai.RateLimitError as e:
+            # HTTP 429。az login / .env とは無関係（Azure 側のレート制限・一時的な混雑）。
+            # SDK が既定リトライを使い切っても表面化することがある。時間をおけば通ることが多い。
+            status.empty()
+            st.error(
+                "LLM 検出が Azure 側のレート制限／一時的な混雑で失敗しました（HTTP 429）。\n"
+                "認証・設定の問題ではありません。少し待ってから再実行してください。\n"
+                f"（詳細: {e}）"
+            )
+            return
+        except openai.APITimeoutError as e:
+            status.empty()
+            st.error(
+                "LLM 検出がタイムアウトしました。文書が大きい場合は時間をおいて再実行してください。\n"
+                f"（詳細: {e}）"
+            )
+            return
+        except openai.AuthenticationError as e:
+            status.empty()
+            st.error(
+                "LLM 検出の認証に失敗しました。実機で `az login` 済みか、"
+                ".env の RESOURCE_NAME_GPT41_MINI を確認してください。\n"
+                f"（詳細: {e}）"
+            )
+            return
         except Exception as e:  # noqa: BLE001
             status.empty()
             st.error(
