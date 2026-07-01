@@ -900,13 +900,16 @@ def apply_allowlist(
     一方、**連絡先 regex（強）**（例 `20181210112500@MH01R2.sdf` の誤検出メール）は検出由来なので、
     人が明示的に除外できる（表層単位なので本物のメールには波及しない）。
     ``analyze`` 内でも、UI が確定済み解析へ後から除外を反映するときも、この同一ロジックを使う。
+
+    照合は :meth:`MaskAllowlist.matches`＝完全一致 or ``embed`` 語のサブワード内包一致
+    （``FB`` embed で ``GetFBData`` を丸ごと除外）。
     """
     if not allowlist:
         return list(candidates)
     return [
         (
             replace(c, confidence="除外")
-            if not _has_dict_vote(c) and c.surface in allowlist
+            if not _has_dict_vote(c) and allowlist.matches(c.surface)
             else c
         )
         for c in candidates

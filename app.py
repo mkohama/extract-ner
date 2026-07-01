@@ -986,25 +986,41 @@ def render_allowlist_editor(allowlist_path: str) -> None:
         "**保存先はローカルファイル**（機密・git 管理外）。"
     )
     path = Path(allowlist_path)
-    surfaces = load_allowlist_entries(path) if path.exists() else []
-    surfaces = sorted(
-        surfaces, key=allowlist_sort_key
+    entries = load_allowlist_entries(path) if path.exists() else []
+    entries = sorted(
+        entries, key=lambda e: allowlist_sort_key(e["surface"])
     )  # 既定で辞書順表示（保存も同順）
-    # dtype="string" を明示：空（surfaces=[]）だと既定で float64 列になり data_editor が
-    # 数値入力欄を出して**文字を打てない**（＝新規登録できない）バグになる。TextColumn でも固定。
-    df = pd.DataFrame({"除外語": pd.Series(surfaces, dtype="string")})
+    # dtype を明示：空（entries=[]）だと既定で float64 列になり data_editor が数値入力欄を出して
+    # **文字を打てない**（＝新規登録できない）バグになる。TextColumn/CheckboxColumn でも固定。
+    df = pd.DataFrame(
+        {
+            "除外語": pd.Series([e["surface"] for e in entries], dtype="string"),
+            "内包": pd.Series([e["embed"] for e in entries], dtype="bool"),
+        }
+    )
     edited = st.data_editor(
         df,
         num_rows="dynamic",
         width="stretch",
         height=500,
-        column_config={"除外語": st.column_config.TextColumn("除外語")},
+        column_config={
+            "除外語": st.column_config.TextColumn("除外語"),
+            "内包": st.column_config.CheckboxColumn(
+                "内包",
+                default=False,
+                help="複合語の中（例 GetFBData の FB、NSR用補正ファイル の NSR）も除外する。"
+                "境界照合なので FBI の FB は拾わない。命中した候補は丸ごと除外。",
+            ),
+        },
         key="allowlist_editor",
     )
     if st.button("💾 除外リストを保存", type="primary", key="allowlist_save"):
         kept = [
-            s.strip()
-            for s in edited["除外語"].tolist()
+            {
+                "surface": str(s).strip(),
+                "embed": bool(emb) if not pd.isna(emb) else False,
+            }
+            for s, emb in zip(edited["除外語"].tolist(), edited["内包"].tolist())
             if not pd.isna(s) and str(s).strip()
         ]
         save_allowlist_entries(path, kept)
@@ -1259,7 +1275,11 @@ def render_masking_result(stored: dict) -> None:
     if excl_clicked and to_exclude:
         path = Path(allowlist_path)
         current = load_allowlist_entries(path) if path.exists() else []
-        merged = current + [s for s in to_exclude if s not in current]
+        existing = {e["surface"] for e in current}
+        # UI から送る除外は完全一致（embed=False）。embed 登録は除外リストエディタで行う。
+        merged = current + [
+            {"surface": s, "embed": False} for s in to_exclude if s not in existing
+        ]
         save_allowlist_entries(path, merged)
         added = len(merged) - len(current)
         # 現在の解析結果にその場で適用（再解析不要）。署名も更新してバナーを出さない。
