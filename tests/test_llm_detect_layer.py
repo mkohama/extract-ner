@@ -148,3 +148,58 @@ def test_empty_text() -> None:
     assert det.spans == ()
     assert det.not_found == ()
     assert det.detector_version == "v1"
+
+
+# --- 止血: 一過性 429 のリトライ／バックオフ ------------------------------------ #
+import httpx  # noqa: E402
+import openai  # noqa: E402
+import pytest  # noqa: E402
+
+from src.llm import detect_layer  # noqa: E402
+
+
+def _rate_limit_error(retry_after: str | None = None) -> openai.RateLimitError:
+    """Azure の一過性 429（"Backend error."）を模した RateLimitError。"""
+    headers = {"retry-after": retry_after} if retry_after else {}
+    req = httpx.Request("POST", "https://x.openai.azure.com/openai/v1/chat/completions")
+    resp = httpx.Response(429, headers=headers, request=req)
+    return openai.RateLimitError("Backend error.", response=resp, body=None)
+
+
+def test_call_with_retry_recovers_after_transient_429(monkeypatch) -> None:
+    """数回 429 が続いても、規定回数内に成功すれば結果を返す（待機は入るが例外にしない）。"""
+    monkeypatch.setattr(detect_layer.time, "sleep", lambda _s: None)  # 待機を潰す
+    monkeypatch.setattr(detect_layer, "LLM_MAX_RETRIES", 5)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:  # 最初の2回は 429、3回目で成功
+            raise _rate_limit_error()
+        return ["ok"]
+
+    assert detect_layer._call_with_retry(flaky) == ["ok"]
+    assert calls["n"] == 3
+
+
+def test_call_with_retry_raises_after_exhausting(monkeypatch) -> None:
+    """規定回数を超えて 429 が続けば最後の RateLimitError を送出する。"""
+    monkeypatch.setattr(detect_layer.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(detect_layer, "LLM_MAX_RETRIES", 2)
+    calls = {"n": 0}
+
+    def always_429():
+        calls["n"] += 1
+        raise _rate_limit_error()
+
+    with pytest.raises(openai.RateLimitError):
+        detect_layer._call_with_retry(always_429)
+    assert calls["n"] == 3  # 初回 + リトライ2回
+
+
+def test_retry_wait_prefers_retry_after_header(monkeypatch) -> None:
+    """Retry-After ヘッダがあれば指数バックオフより優先する。"""
+    monkeypatch.setattr(detect_layer, "LLM_RETRY_BASE_WAIT", 2.0)
+    assert detect_layer._retry_wait(_rate_limit_error("7"), attempt=3) == 7.0
+    # ヘッダ無しは指数バックオフ（base * 2^attempt）
+    assert detect_layer._retry_wait(_rate_limit_error(), attempt=3) == 16.0
