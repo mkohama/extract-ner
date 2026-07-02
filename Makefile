@@ -57,8 +57,15 @@ docker-sync-build:
 	fi
 	@HASH=$$(git -C external/pii-masker rev-parse --short HEAD); \
 	 echo "pii-masker HEAD: $$HASH"; \
-	 perl -i -pe "s/pii-masker\@[0-9a-fA-F]+/pii-masker\@$$HASH/" app.py; \
-	 echo "Rewrote app.py detector hash -> pii-masker@$$HASH (LLM cache will auto-miss)"
+	 OLD=$$(perl -ne 'if (/pii-masker\@([0-9a-fA-F]+)/) { print $$1; last }' app.py); \
+	 if [ -z "$$OLD" ]; then \
+		echo "WARNING: pii-masker@<hash> not found in app.py; skipped rewrite (check _DETECTOR_STATIC)"; \
+	 elif [ "$$OLD" = "$$HASH" ]; then \
+		echo "app.py detector hash already latest (pii-masker@$$HASH); no change, LLM cache stays valid"; \
+	 else \
+		perl -i -pe "s/pii-masker\@[0-9a-fA-F]+/pii-masker\@$$HASH/" app.py; \
+		echo "Rewrote app.py detector hash pii-masker@$$OLD -> pii-masker@$$HASH (LLM cache will auto-miss)"; \
+	 fi
 	@$(MAKE) docker-build
 
 docker-up:
