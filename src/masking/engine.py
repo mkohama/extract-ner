@@ -151,8 +151,10 @@ _CONTACT_PATTERNS: tuple[re.Pattern[str], ...] = (_EMAIL_RE,)
 # 変数名/列挙子）とみなし、中/弱 の候補を **微弱**（既定で非表示・自動マスク外）へ落とす（§ analyze）。
 # 確定/強（辞書・連絡先・2系統一致・昇格）は対象にしない＝確信度の根拠があるものは守る。
 _CODE_MARKER_RE = re.compile(
-    r"[_@~\[\]{}=!<>;|]|::"
-)  # Em_NoYes / Em_OffOn::idOff / ピッチ@ / ~C02 / `37D]==0` / `a=b` 等（[ ] { } = ! < > ; | も）
+    r"[_@~\[\]{}=!<>;|\\]|::"
+)  # Em_NoYes / Em_OffOn::idOff / ピッチ@ / ~C02 / `37D]==0` / `a=b` 等（[ ] { } = ! < > ; | も）。
+# `\`（バックスラッシュ）も＝ファイルパス `C:\Group\ABC-Z\...` を NER が `Group\ABC-Z` と塊にして
+# 社名に誤爆する。実在の人名・社名に `\` は現れないのでコードマーカー扱いで微弱へ落とす。
 # 「名前に使われる字」＝英字 or 日本語（かな U+3040-30FF・漢字 U+3400-9FFF）。これを 1 つも
 # 含まない＝数字/記号のみ（例 7-410）。
 _NAME_CHAR_RE = re.compile(r"[A-Za-z぀-ヿ㐀-鿿]")
@@ -173,6 +175,12 @@ _CJK_SEP_ADJ_ASCII_RE = re.compile(
 # 実在名は英数字/CJK 文字で始まり終わる（`Coca-Cola`/`Anne-Marie` は**内部**ハイフンなので対象外＝守る）。
 # 長音 `ー`(U+30FC) は含めない（`サーバー` 等の正当なカナ語末に出るため）。
 _DANGLING_SEP_RE = re.compile(r"^[-‐‑–—―・･]|[-‐‑–—―・･]$")
+# 丸括弧（ASCII `()`・全角 `（）`）。NER スパンが `LSMonitor(...)` の開き括弧を巻き込むと
+# `LSMonito(` のように**不均衡な括弧**で終わる/始まる人工物になる。ブラケット `[ ] { }` は常に
+# コード（_CODE_MARKER_RE で拾う）だが、丸括弧は `Sony (Japan)` 等の正当な社名に出るので
+# **数の不均衡（open≠close）**だけを artifact とみなす（均衡した括弧つき社名は守る）。
+_OPEN_PARENS = "(（"
+_CLOSE_PARENS = ")）"
 # 日本語の「文字」（ひらがな・カタカナ・漢字）。区切り記号 `・`(U+30FB) や `「` は**含めない**
 # ＝NER の人名票を弱める判定で「日本語人名は信頼する」ためのゲートに使う（_looks_like_nonperson_latin）。
 _JP_LETTER_RE = re.compile(r"[ぁ-ゖァ-ヺー㐀-䶿一-鿿]")
@@ -509,7 +517,7 @@ class MaskingEngine:
         # 除外リスト(allowlist)：人が「機密でない」と登録した語を「除外」へ落とす
         #   （辞書＝名簿は守る。連絡先 regex の誤検出メール等は検出由来なので除外可）。
         if allowlist is not None:
-            clusters = apply_allowlist(clusters, allowlist)
+            clusters = apply_allowlist(clusters, allowlist, tokens)
 
         return MaskAnalysis(
             text=text,
@@ -762,8 +770,9 @@ def _looks_like_code(surface: str) -> bool:
     """社内コード/変数名らしき表層か（実在の人名・社名には現れない特徴）。
 
     いずれかに該当：
-    - 記号マーカー ``_`` / ``::`` / ``@`` / ``~`` / ``[ ] { } = ! < > ; |`` を含む
-      （例 ``Em_NoYes`` / ``Em_OffOn::idOff`` / ``ピッチ@`` / ``~C02`` / ``37D]==0``）。
+    - 記号マーカー ``_`` / ``::`` / ``@`` / ``~`` / ``[ ] { } = ! < > ; | \\`` を含む
+      （例 ``Em_NoYes`` / ``Em_OffOn::idOff`` / ``ピッチ@`` / ``~C02`` / ``37D]==0`` /
+      ファイルパス由来の ``Group\\ABC-Z``）。
     - 英字も日本語（かな・漢字）も含まない＝数字・記号のみ（例 ``7-410``）。
     - **ASCII のみ＋数字を含む**（例 ``16D`` / ``1L`` / ``37D``）。実在の人名・社名はまず数字を含まない。
     - **CJK区切り/括弧が ASCII 英字に隣接**（例 ``AP・`` / ``theta・「`` / ``会社「A」``）＝NER スパンが
@@ -771,6 +780,8 @@ def _looks_like_code(surface: str) -> bool:
       （``C型補正値リミット・チェック結果``）や純カナの中黒名（``ジョン・スミス``）は対象外＝守る。
     - **先頭/末尾に垂れたハイフン類・中黒**（例 ``AP-`` / ``R-`` / ``-C02`` / ``田中・``）＝境界の人工物。
       内部ハイフンの実在名（``Coca-Cola`` / ``Anne-Marie``）や長音 ``ー`` は対象外＝守る。
+    - **不均衡な丸括弧**（open≠close。例 ``LSMonito(`` / ``)Monitor``）＝NER スパンが括弧を巻き込んだ
+      人工物。均衡した括弧つき社名（``Sony (Japan)`` / ``会社（日本）``）は守る（ASCII/全角とも）。
     - **1 文字語（漢字を除く）**＝ASCII 英字・かな・数字・記号 1 文字（例 ``N`` / ``D``）。実在名では
       まず無い。ただし**漢字 1 文字は実在姓**（林・森・関 等）があるので保護＝対象外。
 
@@ -793,6 +804,10 @@ def _looks_like_code(surface: str) -> bool:
         return (
             True  # 先頭/末尾に垂れたハイフン類・中黒＝境界の人工物（AP- / R- / -C02）
         )
+    if sum(c in _OPEN_PARENS for c in surface) != sum(
+        c in _CLOSE_PARENS for c in surface
+    ):
+        return True  # 不均衡な丸括弧＝スパン境界の人工物（LSMonito( / )Monitor）
     return len(surface) == 1 and not _KANJI_RE.match(surface)
 
 
@@ -891,7 +906,9 @@ def _has_dict_vote(c: Candidate) -> bool:
 
 
 def apply_allowlist(
-    candidates: Iterable[Candidate], allowlist: MaskAllowlist
+    candidates: Iterable[Candidate],
+    allowlist: MaskAllowlist,
+    tokens: Iterable[AnalyzedToken] = (),
 ) -> list[Candidate]:
     """除外リスト一致の候補を「除外」へ落とす（**解析をやり直さず**候補だけ書き換える）。
 
@@ -901,19 +918,21 @@ def apply_allowlist(
     人が明示的に除外できる（表層単位なので本物のメールには波及しない）。
     ``analyze`` 内でも、UI が確定済み解析へ後から除外を反映するときも、この同一ロジックを使う。
 
-    照合は :meth:`MaskAllowlist.matches`＝完全一致 or ``embed`` 語のサブワード内包一致
-    （``FB`` embed で ``GetFBData`` を丸ごと除外）。
+    照合は :meth:`MaskAllowlist.matches`＝完全一致 or ``embed`` 語の境界内包一致
+    （``FB`` embed で ``GetFBData`` を丸ごと除外）。``tokens`` を渡すと、各候補を覆うトークンの表層を
+    embed 照合に使い、**形態素境界**でも効く（日本語対応。``補正`` embed → ``用補正値``）。
+    ``tokens`` 無し（既定）は表層文字列ベースの ASCII/識別子系のみ（後方互換）。
     """
     if not allowlist:
         return list(candidates)
-    return [
-        (
-            replace(c, confidence="除外")
-            if not _has_dict_vote(c) and allowlist.matches(c.surface)
-            else c
-        )
-        for c in candidates
-    ]
+    toks = tuple(tokens)
+    out: list[Candidate] = []
+    for c in candidates:
+        # 候補 [start,end) を覆う（完全に内側の）トークンの表層＝形態素境界での embed 照合に使う。
+        cover = [t.surface for t in toks if c.start <= t.start and t.end <= c.end]
+        hit = not _has_dict_vote(c) and allowlist.matches(c.surface, cover or None)
+        out.append(replace(c, confidence="除外") if hit else c)
+    return out
 
 
 def apply_allowlist_to_analysis(
@@ -922,9 +941,13 @@ def apply_allowlist_to_analysis(
     """解析結果（候補）に除外リストを後から適用した新しい :class:`MaskAnalysis` を返す。
 
     NER は再実行しない（候補の confidence を書き換えるだけ）＝除外の反映が即座で済む。
+    ``analysis.tokens`` を渡すので embed 除外が形態素境界でも効く（日本語対応）。
     """
     return replace(
-        analysis, candidates=tuple(apply_allowlist(analysis.candidates, allowlist))
+        analysis,
+        candidates=tuple(
+            apply_allowlist(analysis.candidates, allowlist, analysis.tokens)
+        ),
     )
 
 

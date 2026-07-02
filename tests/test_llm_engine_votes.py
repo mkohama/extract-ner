@@ -163,8 +163,17 @@ def test_looks_like_code_v2() -> None:
     """code-like 判定 v2：記号拡張・英数字コード・数字記号のみ・1文字を拾い、実在名は拾わない。"""
     for s in ["16D", "1L", "37D", "Em_Foo", "a=b", "x]y", "{ }", "7-410", "N"]:
         assert _looks_like_code(s), f"code-like のはず: {s}"
+    # `\` を含む＝ファイルパス由来（`C:\Group\ABC-Z\...` の塊）。実在社名に `\` は無い。
+    for s in ["Group\\ABC-Z", "Foo\\Bar", "C:\\Users"]:
+        assert _looks_like_code(s), f"バックスラッシュ混じりは code-like のはず: {s}"
+    # 不均衡な丸括弧＝NER スパンが括弧を巻き込んだ人工物（ASCII / 全角）。
+    for s in ["LSMonito(", "(LSMonito", ")Monitor", "Monitor)", "東芝（"]:
+        assert _looks_like_code(s), f"不均衡括弧は code-like のはず: {s}"
     for s in ["田中", "ニコン", "IBM", "Sony", "Smith", "横浜市"]:
         assert not _looks_like_code(s), f"実在名なので code-like でない: {s}"
+    # 均衡した括弧つき社名は守る（ASCII / 全角）。
+    for s in ["Sony (Japan)", "会社（日本）"]:
+        assert not _looks_like_code(s), f"均衡括弧つき社名は守る: {s}"
 
 
 def test_stage1_codeish_company_not_strong() -> None:

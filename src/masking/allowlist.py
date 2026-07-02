@@ -9,11 +9,19 @@ recall 安全のための重要な制約（適用は :func:`MaskingEngine.analyz
   （名簿や決定的検出を誤って外して漏らさないため）。＝確定 ＞ 除外。
 
 照合は既定で**正規化文字列の完全一致**（:func:`dictionary.normalize` と同じ NFKC+casefold）。
-``embed: true`` を付けた語は、辞書の ``embed`` と**対称**に、複合語の**サブワード境界で内包照合**する
-（例 ``FB`` → ``GetFBData`` の ``FB``、``NSR`` → ``NSR用補正ファイル`` の ``NSR``）。境界照合なので
-``FBI`` の ``FB`` のような**より長い連続の一部は拾わない**（辞書 :meth:`MaskDictionary.embedded_matches`
-と同じ ``_split_identifier``。ASCII/識別子系のサブワード向け）。命中した候補は**丸ごと除外**する
-（辞書 embed は部分マスクだが、除外は候補単位＝スパンは割らない）。
+``embed: true`` を付けた語は、辞書の ``embed`` と**対称**に、複合語の**境界で内包照合**する
+（例 ``FB`` → ``GetFBData`` の ``FB``、``補正`` → ``用補正値`` の ``補正``）。境界照合なので
+``FBI`` の ``FB``（より長い連続の一部）や ``補正`` の一部 ``補`` は拾わない。命中した候補は
+**丸ごと除外**する（辞書 embed は部分マスクだが、除外は候補単位＝スパンは割らない）。
+
+**境界の供給源＝2 段**（:meth:`_contains_embedded_tokens`）:
+- **トークン間＝形態素境界**（SudachiPy トークン。``補正`` → ``用/補正/値``）＝日本語対応。
+  ``apply_allowlist`` が候補を覆うトークン列を渡したときだけ効く。
+- **トークン内＝``_split_identifier`` のサブワード境界**（camelCase・区切り。``GetFBData`` → ``Get/FB/Data``）
+  ＝ASCII/識別子系。トークン無しでも表層文字列から効く（後方互換）。
+
+英語（ASCII）は綴りから境界を導けるので昔から効いていたが、日本語は綴り上の境界が無く形態素解析が要る
+＝これが日本語 embed が効かなかった理由。実装は英語版に**境界供給源としてトークナイザを足した**だけ。
 
 YAML 形式（``data/mask_allowlist.yaml``）::
 
@@ -27,7 +35,7 @@ YAML 形式（``data/mask_allowlist.yaml``）::
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import yaml
@@ -82,35 +90,69 @@ class MaskAllowlist:
             return cls.empty()
         return cls(load_allowlist_entries(p))
 
-    def matches(self, surface: str) -> bool:
-        """除外対象か：**完全一致** or （``embed`` 語の）**サブワード内包一致**。"""
+    def matches(
+        self, surface: str, token_surfaces: Sequence[str] | None = None
+    ) -> bool:
+        """除外対象か：**完全一致** or （``embed`` 語の）**境界内包一致**。
+
+        ``token_surfaces``（候補を覆う SudachiPy トークンの表層列）を渡すと、embed 照合が
+        **形態素境界**でも効く（日本語対応。``補正`` embed → ``用補正値``）。渡さないと従来どおり
+        ``surface`` 文字列を ``_split_identifier`` で割る ASCII/識別子系だけ（後方互換）。
+        """
         if _match_key(surface) in self._norm:
             return True
+        if token_surfaces:
+            return self._contains_embedded_tokens(token_surfaces)
         return self._contains_embedded(surface)
 
     def __contains__(self, surface: str) -> bool:
         """完全一致のみ（後方互換）。内包も含めた判定は :meth:`matches`。"""
         return _match_key(surface) in self._norm
 
+    def _embed_join_hit(self, norm_units: Sequence[str]) -> bool:
+        """正規化済みの単位列で、**連続する部分列の連結**が ``embed`` キーに一致するか。
+
+        単位はトークン（形態素境界）でもサブワード（``_split_identifier`` の camelCase 境界）でも良い。
+        境界照合＝単位をまたぐ連結のみ見るので、単位の**途中**では一致しない（``FB`` は 1 単位
+        ``FBI`` を割れない・``補`` は 1 形態素 ``補正`` を割れない）。
+        """
+        n = len(norm_units)
+        for i in range(n):
+            for length in range(min(MAX_MATCH_TOKENS, n - i), 0, -1):
+                if "".join(norm_units[i : i + length]) in self._embed:
+                    return True
+        return False
+
     def _contains_embedded(self, surface: str) -> bool:
-        """surface が ``embed`` 語をサブワード境界で内包するか（辞書 embedded_matches と同ロジック）。
+        """surface が ``embed`` 語を**サブワード境界**で内包するか（トークン無しの後方互換経路）。
 
         ``_split_identifier`` で ASCII/識別子をサブワードに割り、連続サブワードの正規化連結が
-        ``embed`` キーに一致すれば True（``GetFBData`` の ``FB``、``NSR用補正ファイル`` の ``NSR``）。
-        ``FBI`` は 1 サブワード＝ ``FB`` 単独では一致しない（境界照合）。
+        ``embed`` キーに一致すれば True（``GetFBData`` の ``FB``）。``FBI`` は 1 サブワード＝
+        ``FB`` 単独では一致しない（境界照合）。日本語は割れないので **要 token_surfaces**。
         """
         if not self._embed:
             return False
         subs = _split_identifier(surface)
-        if not subs:
+        return self._embed_join_hit([normalize(surface[a:b]) for a, b in subs])
+
+    def _contains_embedded_tokens(self, token_surfaces: Sequence[str]) -> bool:
+        """候補を覆うトークン列が ``embed`` 語を**境界**で内包するか（辞書 embed の実質的な対称）。
+
+        2 段の境界を見る：**トークン間＝形態素境界**（``補正`` → ``用/補正/値`` の ``補正``。日本語対応）と、
+        **トークン内＝``_split_identifier`` のサブワード境界**（``GetFBData`` の ``FB``。英 camelCase 維持）。
+        どちらも単位の途中では一致しない（境界照合）。英語で表層文字列に対してやっていたことの、
+        供給源にトークナイザ（形態素境界）を足した日本語版。
+        """
+        if not self._embed:
             return False
-        nsubs = [normalize(surface[a:b]) for a, b in subs]
-        n = len(subs)
-        for j in range(n):
-            for length in range(min(MAX_MATCH_TOKENS, n - j), 0, -1):
-                if "".join(nsubs[j : j + length]) in self._embed:
-                    return True
-        return False
+        # トークン間（形態素境界）＝日本語
+        if self._embed_join_hit([normalize(t) for t in token_surfaces]):
+            return True
+        # 各トークン内のサブワード境界＝英 camelCase（GetFBData 等の融合トークン）
+        return any(
+            self._embed_join_hit([normalize(t[a:b]) for a, b in _split_identifier(t)])
+            for t in token_surfaces
+        )
 
     def __bool__(self) -> bool:
         return bool(self._norm)
